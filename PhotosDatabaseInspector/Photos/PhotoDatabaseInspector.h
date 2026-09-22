@@ -48,6 +48,20 @@ NS_ASSUME_NONNULL_BEGIN
    Same resolution rules as above. The union of all fields is compared; differing fields are
    listed per term. */
 - (NSString *)assetCompareReportForSearches:(NSArray<NSString *> *)searches;
+
+#pragma mark TEMPORARY — experiment only, the one write path in this project
+
+/* Added on request on 2026-09-22 to test whether ZASSET.ZKINDSUBTYPE decides how Photos
+   classifies an asset. It opens the database SQLITE_OPEN_READWRITE and runs exactly one UPDATE
+   on exactly one row. No DDL, no journal_mode change, no checkpoint, no VACUUM, and Z_OPT is
+   deliberately left alone. Pass dryRun:YES for the same report with no write at all.
+
+   Returned keys: dryRun, error, filename, uti, savedAssetType, before, after, opt, changed.
+   Remove this API together with its button before any release. */
+- (NSDictionary<NSString *, id> *)kindSubtypeChangeForAssetPrimaryKey:(long long)pk
+                                                              toValue:(long long)subtype
+                                                               dryRun:(BOOL)dryRun;
+- (NSString *)reportForKindSubtypeChange:(NSDictionary<NSString *, id> *)change;
 @end
 
 NS_ASSUME_NONNULL_END

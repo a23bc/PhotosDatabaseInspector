@@ -317,8 +317,11 @@ static void AppendCensus(NSMutableString *out, sqlite3 *db, NSArray<NSString *> 
         [o appendFormat:@"%-9s : %@\n", suffix.UTF8String,
                         attrs ? [NSString stringWithFormat:@"%llu bytes (present)", attrs.fileSize] : @"absent"];
     }
-    [o appendString:@"\nsafety    : no INSERT/UPDATE/DELETE/DDL, no PRAGMA journal_mode=, no checkpoint, no vacuum.\n"];
-    [o appendString:@"            The -wal/-shm sidecars are only read (stat) and never modified by this tool.\n"];
+    [o appendString:@"\nsafety    : the report paths never write. No DDL, no journal_mode change, no checkpoint, no\n"];
+    [o appendString:@"            vacuum. The one write in this build is the TEMP button on the Assets screen: a\n"];
+    [o appendString:@"            single UPDATE on one row, printed together with the old value and the undo\n"];
+    [o appendString:@"            statement. That UPDATE reaches the -wal like any other write; nothing here\n"];
+    [o appendString:@"            checkpoints or edits the sidecar files directly.\n"];
     return o;
 }
 
@@ -937,6 +940,154 @@ static void AppendCensus(NSMutableString *out, sqlite3 *db, NSArray<NSString *> 
     [out appendString:@"A difference between two assets is an observation, not a proof of the screenshot flag.\n"];
     [out appendString:@"Repeat it with more samples before treating any field as the classification.\n"];
     sqlite3_close(db);
+    return out;
+}
+
+#pragma mark TEMPORARY — single-column write for the subtype experiment
+
+/* Added on request on 2026-09-22, for one experiment only: does ZASSET.ZKINDSUBTYPE decide how
+   Photos classifies an asset? This is the only place in the project that opens the database for
+   writing. Even here: one UPDATE, one row, no DDL, no journal_mode change, no checkpoint, no
+   VACUUM, and Z_OPT is deliberately not touched (Core Data uses it for optimistic locking, and
+   whether Photos overwrites us either way is part of what the experiment measures). */
+- (NSDictionary<NSString *, id> *)kindSubtypeChangeForAssetPrimaryKey:(long long)pk
+                                                              toValue:(long long)subtype
+                                                               dryRun:(BOOL)dryRun {
+    NSMutableDictionary<NSString *, id> *result = [NSMutableDictionary dictionary];
+    result[@"dryRun"] = @(dryRun);
+    result[@"pk"] = @(pk);
+    result[@"requested"] = @(subtype);
+
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(self.path.fileSystemRepresentation, &db,
+                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL);
+    if (rc != SQLITE_OK) {
+        result[@"error"] = [NSString stringWithFormat:@"open for writing failed: rc=%d (%s) %s",
+                            rc, sqlite3_errstr(rc), db ? sqlite3_errmsg(db) : "(no handle)"];
+        if (db) sqlite3_close(db);
+        return result;
+    }
+    sqlite3_busy_timeout(db, 5000);
+
+    /* read the current row first: the old value is the only way back */
+    long long before = 0, opt = 0;
+    NSString *filename = nil, *uti = @"(null)", *saved = @"(null)";
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZSAVEDASSETTYPE, ZKINDSUBTYPE, Z_OPT "
+                               "FROM \"ZASSET\" WHERE Z_PK = ?1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, pk);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            filename = Flat(S(sqlite3_column_text(st, 0)));
+            uti = Flat(S(sqlite3_column_text(st, 1)));
+            saved = [NSString stringWithFormat:@"%lld", sqlite3_column_int64(st, 2)];
+            before = sqlite3_column_int64(st, 3);
+            opt = sqlite3_column_int64(st, 4);
+        }
+    }
+    sqlite3_finalize(st);
+    if (!filename) {
+        result[@"error"] = [NSString stringWithFormat:@"no ZASSET row with Z_PK=%lld", pk];
+        sqlite3_close(db);
+        return result;
+    }
+    result[@"filename"] = filename;
+    result[@"uti"] = uti;
+    result[@"savedAssetType"] = saved;
+    result[@"before"] = @(before);
+    result[@"opt"] = @(opt);
+    result[@"after"] = @(before);
+
+    if (dryRun || before == subtype) {
+        result[@"changed"] = @0;
+        sqlite3_close(db);
+        return result;
+    }
+
+    sqlite3_stmt *up = NULL;
+    rc = sqlite3_prepare_v2(db, "UPDATE \"ZASSET\" SET ZKINDSUBTYPE = ?1 WHERE Z_PK = ?2", -1, &up, NULL);
+    if (rc != SQLITE_OK) {
+        result[@"error"] = [NSString stringWithFormat:@"prepare UPDATE failed: %s", sqlite3_errmsg(db)];
+        sqlite3_close(db);
+        return result;
+    }
+    sqlite3_bind_int64(up, 1, subtype);
+    sqlite3_bind_int64(up, 2, pk);
+    rc = sqlite3_step(up);
+    if (rc != SQLITE_DONE) {
+        result[@"error"] = [NSString stringWithFormat:@"UPDATE failed: rc=%d %s", rc, sqlite3_errmsg(db)];
+        sqlite3_finalize(up);
+        sqlite3_close(db);
+        return result;
+    }
+    sqlite3_finalize(up);
+    result[@"changed"] = @(sqlite3_changes(db));
+
+    /* read it back: the report must show what the database now holds, not what we asked for */
+    long long after = before;
+    sqlite3_stmt *vs = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT ZKINDSUBTYPE FROM \"ZASSET\" WHERE Z_PK = ?1", -1, &vs, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(vs, 1, pk);
+        if (sqlite3_step(vs) == SQLITE_ROW) after = sqlite3_column_int64(vs, 0);
+    }
+    sqlite3_finalize(vs);
+    result[@"after"] = @(after);
+    sqlite3_close(db);
+    return result;
+}
+
+- (NSString *)reportForKindSubtypeChange:(NSDictionary<NSString *, id> *)change {
+    NSMutableString *out = [NSMutableString string];
+    BOOL dryRun = [change[@"dryRun"] boolValue];
+    NSNumber *before = change[@"before"], *after = change[@"after"], *changed = change[@"changed"];
+
+    [out appendString:@"TEMPORARY WRITE — ZKINDSUBTYPE\n"];
+    [out appendString:@"==============================\n\n"];
+    [out appendFormat:@"database  : %@\n", self.path];
+    [out appendString:@"open mode : SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX\n"];
+    [out appendString:@"            the only non-read-only open in this project\n"];
+    [out appendFormat:@"generated : %@\n", UTCTimestamp()];
+    [out appendString:@"busy      : sqlite3_busy_timeout = 5000 ms\n"];
+    [out appendString:@"safety    : one UPDATE on one row. No DDL, no journal_mode change, no checkpoint,\n"];
+    [out appendString:@"            no VACUUM. Z_OPT is deliberately left untouched.\n"];
+
+    if (change[@"error"]) {
+        [out appendFormat:@"\nFAILED\n------\n%@\n\nNothing was written.\n", change[@"error"]];
+        return out;
+    }
+
+    [out appendFormat:@"\nTARGET  Z_PK=%@\n", change[@"pk"]];
+    [out appendString:@"----------------\n"];
+    [out appendFormat:@"  %@ = %@\n", Pad(@"ZFILENAME", 22), change[@"filename"]];
+    [out appendFormat:@"  %@ = %@\n", Pad(@"ZUNIFORMTYPEIDENTIFIER", 22), change[@"uti"]];
+    [out appendFormat:@"  %@ = %@\n", Pad(@"ZSAVEDASSETTYPE", 22), change[@"savedAssetType"]];
+    [out appendFormat:@"  %@ = %@\n", Pad(@"ZKINDSUBTYPE (now)", 22), before];
+    [out appendFormat:@"  %@ = %@\n", Pad(@"Z_OPT (untouched)", 22), change[@"opt"]];
+
+    [out appendString:@"\nCHANGE\n------\n"];
+    [out appendFormat:@"  ZKINDSUBTYPE : %@  ->  %@\n", before, change[@"requested"]];
+    [out appendFormat:@"  sql          : UPDATE \"ZASSET\" SET ZKINDSUBTYPE = ?1 WHERE Z_PK = ?2   (?1=%@, ?2=%@)\n",
+                      change[@"requested"], change[@"pk"]];
+    [out appendFormat:@"  UNDO         : UPDATE \"ZASSET\" SET ZKINDSUBTYPE = %@ WHERE Z_PK = %@;\n",
+                      before, change[@"pk"]];
+
+    [out appendString:@"\nRESULT\n------\n"];
+    if (dryRun) {
+        [out appendString:@"  rows changed : 0   (DRY RUN — nothing was written)\n"];
+    } else {
+        [out appendFormat:@"  rows changed : %@\n", changed];
+        [out appendFormat:@"  value now    : %@%@\n", after,
+                          [after isEqual:change[@"requested"]] ? @"" : @"   <- NOT the requested value"];
+    }
+
+    [out appendString:@"\nWHAT TO MEASURE AFTER APPLYING\n"];
+    [out appendString:@"------------------------------\n"];
+    [out appendString:@"- re-dump this Z_PK and re-run Compare against an untouched sibling asset\n"];
+    [out appendString:@"- in Photos: does the asset move in or out of the Screenshots album, and does any\n"];
+    [out appendString:@"  thumbnail or badge change\n"];
+    [out appendString:@"- after a respring or a Photos relaunch: is the value still the one we wrote, or did\n"];
+    [out appendString:@"  Photos write its own back? That answer is the experiment.\n"];
+    [out appendString:@"- Z_OPT was not bumped, so Core Data may consider the row unchanged and save over it.\n"];
+    [out appendString:@"  Whether that happens tells us who owns this column.\n"];
     return out;
 }
 

@@ -5,3 +5,8 @@ build/
 
 # local agent workspace (notes, not project output)
 .workbuddy/
+
+# local evidence and helper scripts: kept on disk, deliberately not in the repository
+logs/
+tools/
+docs/

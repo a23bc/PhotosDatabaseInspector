@@ -18,6 +18,9 @@
   one candidate (`ZKINDSUBTYPE` 10 vs 0) that still carries an unresolved confound, retracts the
   `ZORIGINALHASH` reading, and identifies the missing positive control.
 - Sample comparison of A/B/C: **`DONE for the DB side; needs a camera-photo control`**.
+- Write half of the experiment: **`READY, NOT YET MEASURED`** — the 0.2.3 `TEMP` button can set
+  `ZKINDSUBTYPE`, after a preview-only first tap. The result (does the album follow?) is the next
+  thing to record.
 
 **Observability gap:** the dump preamble does not record the app version, so it is impossible to tell
 from a dumped text which build produced it. Worth adding to `filePreamble` in the next build.
@@ -47,8 +50,11 @@ This repository must not assume the answer in advance.
 - CI: GitHub Actions on a macOS runner
 - Output: `build/PhotosDatabaseInspector.tipa`
 - SQLite access: system `libsqlite3`
-- Database access: `SQLITE_OPEN_READONLY`
-- No database writes in any code path
+- Database access: `SQLITE_OPEN_READONLY` on every report path
+- **One deliberate write path exists**: the temporary `TEMP` experiment button added in 0.2.3
+  (see its own section). Everything else — scan, list, census, dump, compare — never writes.
+- `logs/` and `tools/` are kept on disk but are deliberately not in the repository (`.gitignore`);
+  they were pushed by mistake once and removed again in the commit that introduced this rule
 - `PhotosDatabaseInspector.entitlements` must stay at the repository root: the Makefile reads it from there
 - local build artifacts are kept as `build/ci/PhotosDatabaseInspector-<version>.tipa`, so several
   versions can sit side by side instead of overwriting one another
@@ -494,6 +500,54 @@ two assets' `ZADDEDDATE` differ by more than a few minutes. The age-matched run 
 that would have removed automatically.
 
 
+## Temporary write path — the `TEMP` button (0.2.3, 2026-09-22)
+
+Added on the user's explicit request, to run the write half of the experiment: *does
+`ZASSET.ZKINDSUBTYPE` decide how Photos classifies an asset?*
+
+**This breaks the project's read-only property, on purpose and in exactly one place.**
+`PhotoDatabaseInspector.kindSubtypeChangeForAssetPrimaryKey:toValue:dryRun:` opens the database
+`SQLITE_OPEN_READWRITE` (the only non-read-only open in the project) and runs:
+
+```sql
+UPDATE "ZASSET" SET ZKINDSUBTYPE = ?1 WHERE Z_PK = ?2      -- ?1 = new subtype, ?2 = 5693
+```
+
+Guard rails that are part of the design, not decoration:
+
+- **Two taps.** The first tap on `TEMP set 10` only runs a dry run and pushes a preview report with
+  the current value, the SQL and an `UNDO` statement. Only the second tap (`TEMP apply 10`) writes.
+- **The old value is recorded before the write** and printed, so the report itself is the way back
+  even if the app is killed. `TEMP undo` writes the recorded value back in one tap.
+- **One statement, one row, bound parameters.** No DDL, no `journal_mode` change, no checkpoint, no
+  `VACUUM`, no explicit transaction (a single UPDATE is already atomic). The tool never edits the
+  `-wal` / `-shm` files itself; the UPDATE reaches the WAL like any other write.
+- **`Z_OPT` is deliberately not bumped.** Core Data uses it for optimistic locking; whether Photos
+  saves over our row anyway is part of what the experiment measures.
+- The result is **read back after the write** and the report shows `value now`, flagging it if the
+  database does not hold the requested value.
+- Target is `kTempTargetZPK` (5693) and `kTempTargetSubtype` (10) in `ViewController.m`; retarget
+  there. The preview prints `ZFILENAME` / `ZUNIFORMTYPEIDENTIFIER` so a wrong target is obvious
+  before writing.
+
+**Known risks, stated before running it:** the library is live, so the Photos daemon may hold locks
+(the write can fail with `SQLITE_BUSY`; that is reported, not retried blindly) and may reconcile or
+overwrite the value afterwards. A rejected or reverted write is a result, not a failure.
+
+### How to read the outcome
+
+1. Apply, then **re-dump `Z_PK=5693`** and re-run `Compare` against an untouched sibling (5696 or
+   5694 are the age-matched neighbours from the third comparison).
+2. In Photos: does the asset move in or out of the **Screenshots** album? That is the ground truth
+   for the classification, and it is the whole point.
+3. After a **respring** or a Photos relaunch: is the value still 10, or did Photos write its own
+   back? Persistence across a daemon restart is what separates "Photos reads this column" from
+   "Photos recomputes it".
+4. `TEMP undo` restores the recorded value when the experiment is over.
+
+**Remove the button, the API, `kTempTargetZPK` and this section before any release.**
+
+
 ## Things NOT established yet
 
 The following are hypotheses, not findings:
@@ -520,6 +574,9 @@ The following are hypotheses, not findings:
 - that the camera/lens columns are ever populated on this device (no camera photo has been dumped)
 - that this device's Photos import path is unpatched. Every asset carries the identical
   `ZORIGINALHASH = "fakehash"`, which no stock Photos behaviour explains
+- that a `ZKINDSUBTYPE` write survives the Photos daemon — that is what the new `TEMP` button is for
+- that changing `ZKINDSUBTYPE` changes the classification at all (the button tests it; it is not a
+  finding until the Screenshots album agrees)
 
 Do not turn any of these into project facts without device evidence.
 

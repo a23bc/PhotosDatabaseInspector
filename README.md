@@ -48,9 +48,20 @@ A table of the newest `ZASSET` rows. **Tap a row to select a sample.**
 the keyboard crashed it inside CoreImage (`CI::GLContext`), with no frame of this app in the stack
 other than `main`. See `docs/PHOTOS_DATABASE_HANDOVER.md` and the crash report in `logs/`.
 
-**No database write operation is implemented.** There is no INSERT, UPDATE, DELETE, schema change,
-`journal_mode` change, checkpoint, or vacuum operation in either phase. `-wal` / `-shm` sidecars are
-only `stat`-ed for their size; they are never opened, modified or checkpointed by this tool.
+**Read-only, with one deliberate exception.** Every report path opens the database
+`SQLITE_OPEN_READONLY`; there is no INSERT/UPDATE/DELETE, schema change, `journal_mode` change,
+checkpoint, or vacuum in the scanning, dump or compare code, and the `-wal` / `-shm` sidecars are
+only `stat`-ed for their size.
+
+The exception is a **temporary** experiment button on the Assets screen (`TEMP set 10` / `TEMP undo`,
+version 0.2.3): it opens the database `SQLITE_OPEN_READWRITE` and runs exactly one
+`UPDATE "ZASSET" SET ZKINDSUBTYPE = ?1 WHERE Z_PK = ?2`, on one row (5693 by default —
+`kTempTargetZPK` in `ViewController.m`). It needs **two taps**: the first only previews and prints
+the current value, the SQL and an `UNDO` statement; the second writes. `Z_OPT` is deliberately left
+alone. **It must be removed before any release.**
+
+`logs/` (device evidence, crash reports, exported dumps) and `tools/` (helper scripts) are kept on
+disk but are deliberately **not** in the repository — both are listed in `.gitignore`.
 
 ## Build
 

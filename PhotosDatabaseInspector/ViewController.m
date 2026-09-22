@@ -4,6 +4,11 @@
 
 static NSString *const kDefaultPhotosDatabase = @"/var/mobile/Media/PhotoData/Photos.sqlite";
 
+/* TEMPORARY (2026-09-22): target of the one write button, on request. Change this to retarget,
+   or pass the selected row's Z_PK instead. Remove together with the button. */
+static const long long kTempTargetZPK = 5693;
+static const long long kTempTargetSubtype = 10;
+
 #pragma mark - Shared UI helpers
 
 static UIButton *MakeButton(NSString *title, id target, SEL action) {
@@ -133,9 +138,14 @@ static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
 @property(nonatomic, strong) UIButton *censusButton;
 @property(nonatomic, strong) UIButton *detailButton;
 @property(nonatomic, strong) UIButton *compareButton;
+@property(nonatomic, strong) UIButton *tempSetButton;
+@property(nonatomic, strong) UIButton *tempUndoButton;
 @property(nonatomic, strong) NSArray<NSDictionary<NSString *, NSString *> *> *rows;
 @property(nonatomic, strong) NSMutableIndexSet *selected;
 @property(nonatomic, copy) NSString *error;
+@property(nonatomic, copy) NSString *tempNote;
+@property(nonatomic) BOOL tempArmed;
+@property(nonatomic, strong) NSNumber *tempOriginalSubtype;
 @property(nonatomic) NSInteger limit;
 @property(nonatomic, copy) NSString *total;
 @end
@@ -169,15 +179,24 @@ static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
     self.censusButton = MakeButton(@"Census", self, @selector(showCensus:));
     self.detailButton = MakeButton(@"Detail", self, @selector(showDetail:));
     self.compareButton = MakeButton(@"Compare", self, @selector(compareSelected:));
+    /* TEMPORARY: the only writing control in this project. Two taps: the first one only previews. */
+    self.tempSetButton = MakeButton([NSString stringWithFormat:@"TEMP set %lld", kTempTargetSubtype],
+                                    self, @selector(tempSetSubtype:));
+    self.tempSetButton.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    self.tempUndoButton = MakeButton(@"TEMP undo", self, @selector(tempUndoSubtype:));
+    self.tempUndoButton.titleLabel.font = [UIFont boldSystemFontOfSize:14];
     UIStackView *row1 = MakeButtonRow(@[self.moreButton, self.censusButton]);
     UIStackView *row2 = MakeButtonRow(@[self.detailButton, self.compareButton]);
+    UIStackView *row3 = MakeButtonRow(@[self.tempSetButton, self.tempUndoButton]);
     row1.translatesAutoresizingMaskIntoConstraints = NO;
     row2.translatesAutoresizingMaskIntoConstraints = NO;
+    row3.translatesAutoresizingMaskIntoConstraints = NO;
 
     [self.view addSubview:self.statusLabel];
     [self.view addSubview:self.table];
     [self.view addSubview:row1];
     [self.view addSubview:row2];
+    [self.view addSubview:row3];
     [NSLayoutConstraint activateConstraints:@[
         [self.statusLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:6],
         [self.statusLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
@@ -196,7 +215,12 @@ static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
         [row2.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
         [row2.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
         [row2.heightAnchor constraintEqualToConstant:40],
-        [row2.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-6]
+
+        [row3.topAnchor constraintEqualToAnchor:row2.bottomAnchor constant:6],
+        [row3.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
+        [row3.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
+        [row3.heightAnchor constraintEqualToConstant:40],
+        [row3.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-6]
     ]];
 
     [self reload];
@@ -212,6 +236,8 @@ static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
 - (void)setBusy:(BOOL)busy {
     self.moreButton.enabled = !busy;
     self.censusButton.enabled = !busy;
+    self.tempSetButton.enabled = !busy;
+    self.tempUndoButton.enabled = !busy && self.tempOriginalSubtype != nil;
     [self updateStatus];
 }
 
@@ -245,10 +271,64 @@ static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
         return;
     }
     self.statusLabel.text = [NSString stringWithFormat:
-        @"loaded %lu of %@ assets   selected: %lu\n%@\ntap a row to select; Detail = 1 row, Compare = 2+ rows",
-        (unsigned long)self.rows.count, self.total, (unsigned long)self.selected.count, kDefaultPhotosDatabase];
+        @"loaded %lu of %@ assets   selected: %lu\n%@\ntap a row to select; Detail = 1 row, Compare = 2+ rows%@",
+        (unsigned long)self.rows.count, self.total, (unsigned long)self.selected.count, kDefaultPhotosDatabase,
+        self.tempNote.length ? [NSString stringWithFormat:@"\n%@", self.tempNote] : @""];
     self.detailButton.enabled = (self.selected.count >= 1);
     self.compareButton.enabled = (self.selected.count >= 2);
+    self.tempUndoButton.enabled = (self.tempOriginalSubtype != nil);
+}
+
+#pragma mark TEMPORARY write button (experiment only)
+
+- (void)tempSetSubtype:(id)sender {
+    /* First tap only previews. Only the second tap writes. */
+    [self runTempChangeTo:kTempTargetSubtype dryRun:!self.tempArmed];
+}
+
+- (void)tempUndoSubtype:(id)sender {
+    if (!self.tempOriginalSubtype) {
+        self.tempNote = @"TEMP: no original value recorded in this session. The preview report carries an UNDO statement you can run by hand.";
+        [self updateStatus];
+        return;
+    }
+    [self runTempChangeTo:self.tempOriginalSubtype.longLongValue dryRun:NO];
+}
+
+- (void)runTempChangeTo:(long long)value dryRun:(BOOL)dryRun {
+    [self setBusy:YES];
+    self.statusLabel.text = dryRun
+        ? [NSString stringWithFormat:@"TEMP preview: Z_PK=%lld ZKINDSUBTYPE -> %lld — nothing written yet", kTempTargetZPK, value]
+        : [NSString stringWithFormat:@"TEMP writing: Z_PK=%lld ZKINDSUBTYPE = %lld", kTempTargetZPK, value];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        PhotoDatabaseInspector *inspector = [[PhotoDatabaseInspector alloc] initWithDatabasePath:kDefaultPhotosDatabase];
+        NSDictionary<NSString *, id> *change = [inspector kindSubtypeChangeForAssetPrimaryKey:kTempTargetZPK
+                                                                                     toValue:value
+                                                                                      dryRun:dryRun];
+        NSString *report = [inspector reportForKindSubtypeChange:change];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *failure = change[@"error"];
+            if (!failure) self.tempOriginalSubtype = change[@"before"];
+            self.tempArmed = (dryRun && !failure);
+            [self.tempSetButton setTitle:(self.tempArmed
+                                          ? [NSString stringWithFormat:@"TEMP apply %lld", kTempTargetSubtype]
+                                          : [NSString stringWithFormat:@"TEMP set %lld", kTempTargetSubtype])
+                                 forState:UIControlStateNormal];
+            if (failure) {
+                self.tempNote = [NSString stringWithFormat:@"TEMP: failed — %@", failure];
+            } else if (dryRun) {
+                self.tempNote = [NSString stringWithFormat:
+                    @"TEMP: preview only. Z_PK=%lld %@ (ZKINDSUBTYPE now %@). Tap the same button again to WRITE.",
+                    kTempTargetZPK, change[@"filename"], change[@"before"]];
+            } else {
+                self.tempNote = [NSString stringWithFormat:
+                    @"TEMP: wrote Z_PK=%lld %@ -> %@. UNDO restores %@.",
+                    kTempTargetZPK, change[@"before"], change[@"after"], change[@"before"]];
+            }
+            [self setBusy:NO];
+            [self pushReportNamed:(dryRun ? @"TEMP preview" : @"TEMP write") text:report];
+        });
+    });
 }
 
 - (void)loadMore:(id)sender {
