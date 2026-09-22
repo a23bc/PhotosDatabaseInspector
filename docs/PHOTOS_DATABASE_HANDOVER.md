@@ -9,9 +9,10 @@
 - Phase 2 UI with text input: **`RETRACTED`** — see "Crash" below.
 - Phase 2 UI without text input (0.2.1): `BUILDS GREEN` (CI run `35715762990`, zero compiler
   warnings, artifact `build/ci/PhotosDatabaseInspector-0.2.1.tipa`).
-- First sample comparison attempt: **`INCOMPLETE`** — the two exports are analysed in their own
-  section below; the export meant to contain the PNG contains HEICs instead, so it has to be
-  repeated. The real screenshot sample has not been dumped at all.
+- Asset lookup: **`BROKEN in 0.2.1 and 0.2.0`** — selecting an old asset dumped the newest five
+  (see the regression section). Fixed in **0.2.2**, pinned by `tools/repro_search_bug.py`.
+- First sample comparison attempt: **`INCOMPLETE`** — see its own section; the export meant to hold
+  the PNG holds HEICs instead, and the real screenshot has not been dumped at all.
 - Sample comparison of A/B/C: **`NOT DONE YET`**.
 
 **Observability gap:** the dump preamble does not record the app version, so it is impossible to tell
@@ -192,6 +193,60 @@ Corrections carried in 0.2.1:
 - `ZASSET.ZMASTER` and `ZASSET.ZIMPORTSESSION` are referenced by columns but are not tables on
   iOS 15, so child tables are discovered from the schema instead of a hard-coded join list.
 
+## Regression: 0.2.1 dumped the newest five photos whatever was selected (fixed in 0.2.2)
+
+Reported from the device: *"no matter which photo I select it dumps the newest five, and comparing an
+old PNG with a new HEIC compared the newest two photos."* Correct, and it was a design error, not a
+typo.
+
+**Cause.** 0.2.1 resolved an asset with one OR-ed query:
+
+```sql
+SELECT * FROM "ZASSET" WHERE (ZUUID = ? OR ZUUID LIKE '%?%' OR ZFILENAME LIKE '%?%' OR Z_PK = ?
+                            OR Z_PK IN (SELECT ZASSET FROM "ZADDITIONALASSETATTRIBUTES" WHERE ZORIGINALFILENAME LIKE '%?%'))
+ORDER BY Z_PK DESC LIMIT 20
+```
+
+Selecting the old asset `Z_PK=5` therefore also matched every file name containing a `5`. With
+`ORDER BY Z_PK DESC LIMIT 20` the newest 20 fragment hits filled the result set, the requested row
+fell outside it, and the dump printed the newest five — `assets[0]` in `Compare` did the same, which
+is why two selected samples became "the newest two photos". The report printed the SQL, but the
+`matches` count and the identity of the first match were not printed, so the mis-resolution was
+invisible in the exported text.
+
+**Reproduced and pinned locally** by `tools/repro_search_bug.py`, which builds a miniature ZASSET,
+runs the exact SQL copied out of the dump, shows that `Z_PK=5` is not even in the 20 results, and
+then asserts the new resolution rules. It needs no iOS toolchain:
+
+```text
+legacy first five = [5699, 5698, 5697, 5696, 5695]      <-- selected Z_PK=5 is missing
+```
+
+**Fix (0.2.2).** Resolution is a list of attempts, most precise first, and the first attempt that
+produces rows wins:
+
+| term | attempts |
+| --- | --- |
+| digits only | `Z_PK = ?1` (integer bind) — exact, and a `LIMIT` cannot hide it |
+| anything else | `ZUUID = ?1 COLLATE NOCASE` / `ZFILENAME = ?1 COLLATE NOCASE`, then a fragment fallback over `ZUUID` / `ZFILENAME` / `ZORIGINALFILENAME` |
+| empty | newest asset |
+
+Plus three changes that make a wrong pick visible instead of silent:
+
+- `AssetListViewController` passes the selected row's `Z_PK` as a number through the new
+  `-assetDumpReportForPrimaryKey:` / `-assetCompareReportForPrimaryKeys:` entry points, so the
+  identity is never round-tripped through a string search
+- the SEARCH block now prints `lookup : <which attempt matched> (attempt n/m)` and
+  `first match: Z_PK=… ZFILENAME=… ZUUID=…`, and prints a `WARNING` if a numeric term resolved to a
+  different row
+- `Compare` prints `WARNING` when two terms resolve to the same asset, because that diff is empty
+  by construction and would otherwise look like "no difference found"
+
+Verified locally by the same regression test (exact primary key, case-insensitive exact file name /
+UUID, fragment fallback newest-first, empty term, and the case where a file name merely *contains*
+the digits: `IMG_0005_COPY.PNG` must not match the term `5`).
+
+
 ## Phase 2 — first comparison attempt (2026-09-22, evening)
 
 Evidence: `logs/detail_heif_converted.txt` and `logs/detail_png_original.txt`, analysed with
@@ -209,9 +264,10 @@ The term `5` matched every file name containing a `5`, and because the list is o
 (`IMG_5696.PNG`, `IMG_5695.PNG`, `IMG_5694.PNG`, `IMG_5693.PNG`) appear **only as one-line
 headers, with no field data at all**.
 
-**Therefore the intended PNG ↔ HEIC field comparison has not been performed yet.** It needs a
-re-export of the PNG asset. This is a repeat of the failure mode that motivated removing the text
-field: a search term that silently matches something else.
+This is the same defect as the 0.2.1 lookup bug described above — `term : 5` with the newest five
+dumped is exactly its signature — so the PNG never had a chance to appear. 0.2.2 fixes it and prints
+which lookup matched plus the identity of the first match, so the next export can be checked at a
+glance. **The intended PNG ↔ HEIC field comparison still has not been performed.**
 
 ### Findings that the files DO support
 
@@ -278,9 +334,10 @@ Do not turn any of these into project facts without device evidence.
 
 ## Next experiment
 
-1. **Re-export the PNG asset properly.** The previous export searched `5` and only dumped HEICs.
-   In `Assets`, tap the row of the source PNG → `Detail` → `Share`, or select it together with the
-   HEIC and use `Compare` (no typing). Only then is the PNG ↔ HEIC field diff actually performed.
+1. **Re-export the PNG asset properly** with 0.2.2: in `Assets`, tap the row of the source PNG →
+   `Detail` → `Share`, or select it together with the HEIC and use `Compare`. Check the
+   `lookup :` / `first match :` lines before trusting the dump — they name the asset that was
+   actually read.
 2. **Dump a real native screenshot** (power + volume up). This is the only sample that can test the
    camera/lens hypothesis; nothing dumped so far contains a screenshot.
 3. **Dump a control HEIC imported by another route** (`IMG_5690.HEIC`, Z_PK 5681, `ZKINDSUBTYPE=2`)

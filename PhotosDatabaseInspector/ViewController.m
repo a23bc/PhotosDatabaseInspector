@@ -256,12 +256,13 @@ static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
     [self reload];
 }
 
-- (NSArray<NSString *> *)selectedPrimaryKeys {
-    NSMutableArray<NSString *> *keys = [NSMutableArray array];
+- (NSArray<NSNumber *> *)selectedPrimaryKeys {
+    NSMutableArray<NSNumber *> *keys = [NSMutableArray array];
     [self.selected enumerateIndexesUsingBlock:^(NSUInteger index, BOOL *stop) {
         if (index < self.rows.count) {
             NSString *key = self.rows[index][@"Z_PK"];
-            if (key.length) [keys addObject:key];
+            if (key.length && ![key isEqualToString:@"(null)"])
+                [keys addObject:@(key.longLongValue)];
         }
     }];
     return keys;
@@ -283,29 +284,29 @@ static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
 }
 
 - (void)showDetail:(id)sender {
-    NSArray<NSString *> *keys = [self selectedPrimaryKeys];
+    NSArray<NSNumber *> *keys = [self selectedPrimaryKeys];
     if (!keys.count) return;
-    NSString *key = keys.firstObject;
+    long long key = keys.firstObject.longLongValue;
     [self setBusy:YES];
-    self.statusLabel.text = [NSString stringWithFormat:@"dumping Z_PK=%@…", key];
+    self.statusLabel.text = [NSString stringWithFormat:@"dumping Z_PK=%lld…", key];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         PhotoDatabaseInspector *inspector = [[PhotoDatabaseInspector alloc] initWithDatabasePath:kDefaultPhotosDatabase];
-        NSString *report = [inspector assetDumpReportForSearch:key];
+        NSString *report = [inspector assetDumpReportForPrimaryKey:key];
         dispatch_async(dispatch_get_main_queue(), ^{
             [self setBusy:NO];
-            [self pushReportNamed:[NSString stringWithFormat:@"Z_PK=%@", key] text:report];
+            [self pushReportNamed:[NSString stringWithFormat:@"Z_PK=%lld", key] text:report];
         });
     });
 }
 
 - (void)compareSelected:(id)sender {
-    NSArray<NSString *> *keys = [self selectedPrimaryKeys];
+    NSArray<NSNumber *> *keys = [self selectedPrimaryKeys];
     if (keys.count < 2) return;
     [self setBusy:YES];
     self.statusLabel.text = [NSString stringWithFormat:@"comparing %lu assets…", (unsigned long)keys.count];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         PhotoDatabaseInspector *inspector = [[PhotoDatabaseInspector alloc] initWithDatabasePath:kDefaultPhotosDatabase];
-        NSString *report = [inspector assetCompareReportForSearches:keys];
+        NSString *report = [inspector assetCompareReportForPrimaryKeys:keys];
         dispatch_async(dispatch_get_main_queue(), ^{
             [self setBusy:NO];
             [self pushReportNamed:@"Compare" text:report];

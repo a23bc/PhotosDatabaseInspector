@@ -28,6 +28,11 @@ A table of the newest `ZASSET` rows. **Tap a row to select a sample.**
 - `Detail` — one asset, expanded: the `ZASSET` row, **every table that carries a `ZASSET` column**,
   and one further hop for columns whose name is also a table name (for example
   `ZADDITIONALASSETATTRIBUTES.ZASSETDESCRIPTION` → `ZASSETDESCRIPTION`)
+- how an asset is addressed is deterministic: the selection is passed as `ZASSET.Z_PK`, a term made
+  only of digits is an **exact** primary key and nothing else, and a non-numeric term tries an exact
+  `ZUUID` / file name before any fragment match. An exact key is never mixed with fragments in one
+  query, because a fragment result set plus `ORDER BY Z_PK DESC LIMIT n` silently drops the row that
+  was asked for — `tools/repro_search_bug.py` is the regression test for that 0.2.1 mistake
 - `Compare` — two or more selected assets produce a field-by-field diff of the union of all
   fields, showing only the differing ones
 - reports are shown on a `Report` screen with `Copy` and `Share…`; every dump also ends with a

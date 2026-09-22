@@ -402,49 +402,86 @@ static void AppendCensus(NSMutableString *out, sqlite3 *db, NSArray<NSString *> 
     return records;
 }
 
-/* Builds and runs the ZASSET lookup for one search term.
-   Returns: sql (NSString), binds (NSArray<NSString *>), rows (NSArray<PDRecord *>), error (NSString, optional). */
-- (NSDictionary<NSString *, id> *)queryAssetsWithSearch:(NSString *)search
-                                                     db:(sqlite3 *)db
-                                              assetCols:(NSArray<NSString *> *)assetCols
-                                                related:(NSArray<NSString *> *)related
-                                                  limit:(NSInteger)limit {
-    NSMutableArray<NSString *> *clauses = [NSMutableArray array];
-    NSMutableArray<NSString *> *binds = [NSMutableArray array];
-    if (search.length) {
-        NSString *fragment = [NSString stringWithFormat:@"%%%@%%", LikeEscape(search)];
-        if ([assetCols containsObject:@"ZUUID"]) {
-            [clauses addObject:@"ZUUID = ?"];
-            [binds addObject:search];
-            [clauses addObject:@"ZUUID LIKE ? ESCAPE '\\'"];
-            [binds addObject:fragment];
-        }
-        if ([assetCols containsObject:@"ZFILENAME"]) {
-            [clauses addObject:@"ZFILENAME LIKE ? ESCAPE '\\'"];
-            [binds addObject:fragment];
-        }
-        if ([assetCols containsObject:@"Z_PK"] && IsDigits(search)) {
-            [clauses addObject:@"Z_PK = ?"];
-            [binds addObject:search];
-        }
-        /* Imported files may only be reachable through the original file name. */
-        for (NSString *table in related) {
-            NSArray<NSString *> *cols = ColumnsOfTable(db, table);
-            if ([cols containsObject:@"ZASSET"] && [cols containsObject:@"ZORIGINALFILENAME"]) {
-                [clauses addObject:[NSString stringWithFormat:@"Z_PK IN (SELECT ZASSET FROM %@ WHERE ZORIGINALFILENAME LIKE ? ESCAPE '\\')", QID(table)]];
-                [binds addObject:fragment];
-            }
+/* Resolution is exact first; fragments are only a fallback.
+   Mixing an exact key with a LIKE fragment in one OR-ed query and then applying
+   "ORDER BY Z_PK DESC LIMIT n" silently drops the row that was asked for: looking up Z_PK=5 also
+   matches every file name containing "5", and the newest of those fill the limit. That is the
+   0.2.1 bug where selecting an old asset dumped the five newest photos.
+   tools/repro_search_bug.py reproduces it with the exact SQL. */
+
+/* Candidate lookups for one term, most precise first.
+   Each attempt: mode (label), sql, pk (NSNumber, bound as INTEGER) or binds (NSArray<NSString *>). */
+- (NSArray<NSDictionary<NSString *, id> *> *)lookupAttemptsForTerm:(NSString *)term
+                                                                db:(sqlite3 *)db
+                                                         assetCols:(NSArray<NSString *> *)assetCols
+                                                           related:(NSArray<NSString *> *)related
+                                                             limit:(NSInteger)limit {
+    NSMutableArray<NSDictionary<NSString *, id> *> *attempts = [NSMutableArray array];
+    NSString *order = [NSString stringWithFormat:@" ORDER BY Z_PK DESC LIMIT %ld", (long)limit];
+
+    if (IsDigits(term)) {
+        /* A plain number is a primary key, never a fragment. Exact, so the limit cannot hide it. */
+        [attempts addObject:@{@"mode": [NSString stringWithFormat:@"exact Z_PK = %@", term],
+                              @"sql": [NSString stringWithFormat:@"SELECT * FROM %@ WHERE Z_PK = ?1%@", QID(@"ZASSET"), order],
+                              @"pk": @(term.longLongValue),
+                              @"binds": @[]}];
+        return attempts;
+    }
+
+    if (!term.length) {
+        [attempts addObject:@{@"mode": @"newest asset (no term)",
+                              @"sql": [NSString stringWithFormat:@"SELECT * FROM %@%@", QID(@"ZASSET"), order],
+                              @"binds": @[]}];
+        return attempts;
+    }
+
+    NSMutableArray<NSString *> *exactClauses = [NSMutableArray array];
+    if ([assetCols containsObject:@"ZUUID"]) [exactClauses addObject:@"ZUUID = ?1 COLLATE NOCASE"];
+    if ([assetCols containsObject:@"ZFILENAME"]) [exactClauses addObject:@"ZFILENAME = ?1 COLLATE NOCASE"];
+    if (exactClauses.count)
+        [attempts addObject:@{@"mode": @"exact ZUUID / ZFILENAME",
+                              @"sql": [NSString stringWithFormat:@"SELECT * FROM %@ WHERE (%@)%@",
+                                       QID(@"ZASSET"), [exactClauses componentsJoinedByString:@" OR "], order],
+                              @"binds": @[term]}];
+
+    NSString *fragment = [NSString stringWithFormat:@"%%%@%%", LikeEscape(term)];
+    NSMutableArray<NSString *> *fuzzyClauses = [NSMutableArray array];
+    NSMutableArray<NSString *> *fuzzyBinds = [NSMutableArray array];
+    if ([assetCols containsObject:@"ZUUID"]) {
+        [fuzzyClauses addObject:@"ZUUID LIKE ? ESCAPE '\\'"];
+        [fuzzyBinds addObject:fragment];
+    }
+    if ([assetCols containsObject:@"ZFILENAME"]) {
+        [fuzzyClauses addObject:@"ZFILENAME LIKE ? ESCAPE '\\'"];
+        [fuzzyBinds addObject:fragment];
+    }
+    /* Imported files may only be reachable through the original file name. */
+    for (NSString *table in related) {
+        NSArray<NSString *> *cols = ColumnsOfTable(db, table);
+        if ([cols containsObject:@"ZASSET"] && [cols containsObject:@"ZORIGINALFILENAME"]) {
+            [fuzzyClauses addObject:[NSString stringWithFormat:@"Z_PK IN (SELECT ZASSET FROM %@ WHERE ZORIGINALFILENAME LIKE ? ESCAPE '\\')", QID(table)]];
+            [fuzzyBinds addObject:fragment];
         }
     }
-    NSString *where = clauses.count ? [NSString stringWithFormat:@" WHERE (%@)", [clauses componentsJoinedByString:@" OR "]] : @"";
-    NSString *sql = [NSString stringWithFormat:@"SELECT * FROM %@%@ ORDER BY Z_PK DESC LIMIT %ld", QID(@"ZASSET"), where, (long)limit];
+    if (fuzzyClauses.count)
+        [attempts addObject:@{@"mode": @"fragment of ZUUID / ZFILENAME / ZORIGINALFILENAME",
+                              @"sql": [NSString stringWithFormat:@"SELECT * FROM %@ WHERE (%@)%@",
+                                       QID(@"ZASSET"), [fuzzyClauses componentsJoinedByString:@" OR "], order],
+                              @"binds": fuzzyBinds}];
+    return attempts;
+}
 
+- (NSDictionary<NSString *, id> *)runAssetQuery:(NSString *)sql
+                                          binds:(NSArray<NSString *> *)binds
+                                             pk:(NSNumber *)pk
+                                             db:(sqlite3 *)db {
     NSMutableArray<PDRecord *> *rows = [NSMutableArray array];
     NSMutableString *error = nil;
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &st, NULL) != SQLITE_OK) {
         error = [NSMutableString stringWithFormat:@"prepare failed: %s", sqlite3_errmsg(db)];
     } else {
+        if (pk) sqlite3_bind_int64(st, 1, pk.longLongValue);
         for (NSUInteger i = 0; i < binds.count; i++)
             sqlite3_bind_text(st, (int)(i + 1), binds[i].UTF8String, -1, SQLITE_TRANSIENT);
         int rc = SQLITE_OK;
@@ -455,10 +492,40 @@ static void AppendCensus(NSMutableString *out, sqlite3 *db, NSArray<NSString *> 
 
     NSMutableDictionary<NSString *, id> *result = [NSMutableDictionary dictionary];
     result[@"sql"] = sql;
-    result[@"binds"] = binds;
+    result[@"binds"] = binds ?: @[];
     result[@"rows"] = rows;
     if (error) result[@"error"] = error;
     return result;
+}
+
+/* Runs the attempts in order and returns the first one that produces rows.
+   Keys: rows, sql, binds, mode, pass, error. */
+- (NSDictionary<NSString *, id> *)lookupAssetsForTerm:(NSString *)term
+                                                   db:(sqlite3 *)db
+                                            assetCols:(NSArray<NSString *> *)assetCols
+                                              related:(NSArray<NSString *> *)related
+                                                limit:(NSInteger)limit {
+    NSArray<NSDictionary<NSString *, id> *> *attempts = [self lookupAttemptsForTerm:term db:db assetCols:assetCols related:related limit:limit];
+    NSDictionary<NSString *, id> *last = nil;
+    for (NSUInteger i = 0; i < attempts.count; i++) {
+        NSDictionary<NSString *, id> *attempt = attempts[i];
+        NSDictionary<NSString *, id> *result = [self runAssetQuery:attempt[@"sql"]
+                                                             binds:attempt[@"binds"]
+                                                                pk:attempt[@"pk"]
+                                                                db:db];
+        last = result;
+        if ([result[@"rows"] count]) {
+            NSMutableDictionary<NSString *, id> *hit = [result mutableCopy];
+            hit[@"mode"] = attempt[@"mode"];
+            hit[@"pass"] = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)(i + 1), (unsigned long)attempts.count];
+            return hit;
+        }
+    }
+    NSMutableDictionary<NSString *, id> *miss = [(last ?: @{@"sql": @"(no attempt)", @"binds": @[]}) mutableCopy];
+    miss[@"rows"] = @[];
+    miss[@"mode"] = @"no match";
+    miss[@"pass"] = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)attempts.count, (unsigned long)attempts.count];
+    return miss;
 }
 
 #pragma mark Phase 1 (unchanged)
@@ -641,6 +708,10 @@ static void AppendCensus(NSMutableString *out, sqlite3 *db, NSArray<NSString *> 
 
 #pragma mark Phase 2 : single asset dump
 
+- (NSString *)assetDumpReportForPrimaryKey:(long long)pk {
+    return [self assetDumpReportForSearch:[NSString stringWithFormat:@"%lld", pk]];
+}
+
 - (NSString *)assetDumpReportForSearch:(NSString *)search {
     NSMutableString *out = [NSMutableString string];
     [out appendString:@"ASSET DUMP - Photos.sqlite (Phase 2, READ-ONLY)\n"];
@@ -660,7 +731,7 @@ static void AppendCensus(NSMutableString *out, sqlite3 *db, NSArray<NSString *> 
     NSArray<NSString *> *assetCols = ColumnsOfTable(db, @"ZASSET");
     NSArray<NSString *> *related = [self relatedTablesInDB:db from:tables];
 
-    NSDictionary<NSString *, id> *query = [self queryAssetsWithSearch:search db:db assetCols:assetCols related:related limit:20];
+    NSDictionary<NSString *, id> *query = [self lookupAssetsForTerm:search db:db assetCols:assetCols related:related limit:20];
     NSString *sql = query[@"sql"];
     NSArray<NSString *> *binds = query[@"binds"];
     NSArray<PDRecord *> *assets = query[@"rows"];
@@ -668,17 +739,27 @@ static void AppendCensus(NSMutableString *out, sqlite3 *db, NSArray<NSString *> 
 
     [out appendString:@"\nSEARCH\n------\n"];
     [out appendFormat:@"term       : %@\n", search.length ? search : @"(empty -> newest asset)"];
+    [out appendFormat:@"lookup     : %@  (attempt %@)\n", query[@"mode"], query[@"pass"]];
     [out appendFormat:@"sql        : %@\n", sql];
     if (binds.count) {
         NSMutableArray<NSString *> *bs = [NSMutableArray array];
         for (NSUInteger i = 0; i < binds.count; i++) [bs addObject:[NSString stringWithFormat:@"?%lu=%@", (unsigned long)(i + 1), Flat(binds[i])]];
         [out appendFormat:@"bindings   : %@\n", [bs componentsJoinedByString:@"  "]];
     } else {
-        [out appendString:@"bindings   : none (no search term matched a known column)\n"];
+        [out appendString:@"bindings   : none\n"];
     }
     [out appendFormat:@"related    : %lu table(s) reference ZASSET -> %@\n", (unsigned long)related.count, [related componentsJoinedByString:@", "]];
     if (error) [out appendFormat:@"ERROR      : %@\n", error];
     [out appendFormat:@"matches    : %lu\n", (unsigned long)assets.count];
+    if (assets.count) {
+        PDRecord *first = assets[0];
+        [out appendFormat:@"first match: Z_PK=%@  ZFILENAME=%@  ZUUID=%@\n",
+                          [first valueForColumn:@"Z_PK"] ?: @"?",
+                          [first valueForColumn:@"ZFILENAME"] ?: @"(null)",
+                          [first valueForColumn:@"ZUUID"] ?: @"(null)"];
+        if (IsDigits(search) && first.pk != search.longLongValue)
+            [out appendString:@"WARNING    : the first match is not the Z_PK that was asked for\n"];
+    }
 
     if (!assets.count) {
         [out appendString:@"\nNo ZASSET row matched. Nothing was written to the database.\n"];
@@ -752,6 +833,12 @@ static void AppendCensus(NSMutableString *out, sqlite3 *db, NSArray<NSString *> 
 
 #pragma mark Phase 2 : comparison
 
+- (NSString *)assetCompareReportForPrimaryKeys:(NSArray<NSNumber *> *)pks {
+    NSMutableArray<NSString *> *terms = [NSMutableArray arrayWithCapacity:pks.count];
+    for (NSNumber *pk in pks) [terms addObject:[NSString stringWithFormat:@"%lld", pk.longLongValue]];
+    return [self assetCompareReportForSearches:terms];
+}
+
 - (NSString *)assetCompareReportForSearches:(NSArray<NSString *> *)searches {
     NSMutableString *out = [NSMutableString string];
     [out appendString:@"ASSET COMPARE - Photos.sqlite (Phase 2, READ-ONLY)\n"];
@@ -776,12 +863,13 @@ static void AppendCensus(NSMutableString *out, sqlite3 *db, NSArray<NSString *> 
     NSMutableArray<NSString *> *order = [NSMutableArray array];
     NSMutableSet<NSString *> *orderSet = [NSMutableSet set];
 
+    NSMutableSet<NSString *> *resolvedPKs = [NSMutableSet set];
     [out appendString:@"\nSEARCHES\n--------\n"];
     for (NSUInteger i = 0; i < searches.count; i++) {
         NSString *term = searches[i];
         unichar letterChar = (unichar)('A' + (i % 26));
         NSString *letter = [NSString stringWithCharacters:&letterChar length:1];
-        NSDictionary<NSString *, id> *query = [self queryAssetsWithSearch:term db:db assetCols:assetCols related:related limit:5];
+        NSDictionary<NSString *, id> *query = [self lookupAssetsForTerm:term db:db assetCols:assetCols related:related limit:5];
         NSString *error = query[@"error"];
         NSArray<PDRecord *> *assets = query[@"rows"];
         if (!assets.count) {
@@ -789,11 +877,18 @@ static void AppendCensus(NSMutableString *out, sqlite3 *db, NSArray<NSString *> 
             continue;
         }
         PDRecord *asset = assets[0];
-        [out appendFormat:@"  %@: %@  -> Z_PK=%lld  ZFILENAME=%@  ZUNIFORMTYPEIDENTIFIER=%@%@\n",
-                          letter, term, asset.pk,
+        [out appendFormat:@"  %@: %@  -> %@  Z_PK=%lld  ZFILENAME=%@  ZUNIFORMTYPEIDENTIFIER=%@%@\n",
+                          letter, term, query[@"mode"], asset.pk,
                           [asset valueForColumn:@"ZFILENAME"] ?: @"(null)",
                           [asset valueForColumn:@"ZUNIFORMTYPEIDENTIFIER"] ?: @"(null)",
                           assets.count > 1 ? [NSString stringWithFormat:@"   (%lu matches, using the first)", (unsigned long)assets.count] : @""];
+        /* A round-trip through a string must never quietly become a different asset. */
+        if (IsDigits(term) && asset.pk != term.longLongValue)
+            [out appendFormat:@"       WARNING: %@ was resolved to Z_PK=%lld, not %@\n", term, asset.pk, term];
+        NSString *pkKey = [NSString stringWithFormat:@"%lld", asset.pk];
+        if ([resolvedPKs containsObject:pkKey])
+            [out appendFormat:@"       WARNING: %@ resolved to Z_PK=%lld, which another term already resolved to; the diff for these two will be empty\n", letter, asset.pk];
+        [resolvedPKs addObject:pkKey];
         NSMutableArray<NSString *> *notes = [NSMutableArray array];
         NSArray<PDRecord *> *records = [self recordsForAsset:asset db:db related:related tableSet:tableSet notes:notes];
         NSMutableDictionary<NSString *, NSString *> *map = [NSMutableDictionary dictionary];

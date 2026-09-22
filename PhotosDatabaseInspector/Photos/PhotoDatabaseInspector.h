@@ -28,13 +28,25 @@ NS_ASSUME_NONNULL_BEGIN
    Each row is keyed by the ZASSET column name, so a UI can pick samples by tapping. */
 - (NSDictionary<NSString *, id> *)assetOverviewWithLimit:(NSInteger)limit;
 
+/* Phase 2: full record dump for one asset, addressed by ZASSET.Z_PK. */
+- (NSString *)assetDumpReportForPrimaryKey:(long long)pk;
+
 /* Phase 2: full record dump (ZASSET + every table referencing this asset) for each match.
    `search` may be a Z_PK, a ZUUID, a file name fragment or an original file name fragment.
-   Pass nil/empty to dump the most recent asset. At most 5 assets are dumped in full. */
+   Pass nil/empty to dump the most recent asset. At most 5 assets are dumped in full.
+
+   Resolution order, and it matters: a term made only of digits is an **exact Z_PK** and nothing
+   else; otherwise an exact ZUUID / file name is tried first and a fragment match is only a
+   fallback. A lookup never mixes an exact key with fragments, because a fragment match set plus
+   "ORDER BY Z_PK DESC LIMIT n" silently drops the row that was asked for. */
 - (NSString *)assetDumpReportForSearch:(nullable NSString *)search;
 
+/* Phase 2: field-by-field comparison of assets addressed by ZASSET.Z_PK. */
+- (NSString *)assetCompareReportForPrimaryKeys:(NSArray<NSNumber *> *)pks;
+
 /* Phase 2: field-by-field comparison of the first asset matched by each search term.
-   The union of all fields is compared; differing fields are listed per term. */
+   Same resolution rules as above. The union of all fields is compared; differing fields are
+   listed per term. */
 - (NSString *)assetCompareReportForSearches:(NSArray<NSString *> *)searches;
 @end
 
