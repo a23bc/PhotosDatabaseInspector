@@ -8,8 +8,14 @@
 - Phase 2 (asset record dump + comparison): `WORKS` (0.2.0 produced a full asset list on the device).
 - Phase 2 UI with text input: **`RETRACTED`** — see "Crash" below.
 - Phase 2 UI without text input (0.2.1): `BUILDS GREEN` (CI run `35715762990`, zero compiler
-  warnings, artifact `build/ci/PhotosDatabaseInspector-0.2.1.tipa`), **not installed on the device yet**.
+  warnings, artifact `build/ci/PhotosDatabaseInspector-0.2.1.tipa`).
+- First sample comparison attempt: **`INCOMPLETE`** — the two exports are analysed in their own
+  section below; the export meant to contain the PNG contains HEICs instead, so it has to be
+  repeated. The real screenshot sample has not been dumped at all.
 - Sample comparison of A/B/C: **`NOT DONE YET`**.
+
+**Observability gap:** the dump preamble does not record the app version, so it is impossible to tell
+from a dumped text which build produced it. Worth adding to `filePreamble` in the next build.
 
 Last updated: 2026-09-22.
 
@@ -139,10 +145,18 @@ Evidence: `logs/PhotosDatabaseInspector-2026-09-22-180234.ips` (0.2.0 build 2, i
    -> CIContext contextWithOptions: -> CI::GLContext::GLContext(...)   <-- crash: call through a NULL pointer
   ```
 
-**Conclusion (what the evidence supports):** showing the keyboard is what killed 0.2.0. The first
-time this process renders a CoreUI "styled image" it creates the process-wide shared `CIContext`,
-and that construction segfaults on this device/OS. Our own code never appears in the stack, and the
-entitlements are not implicated: the same process had already read `Photos.sqlite` successfully.
+**Conclusion (what the evidence supports):** a text field was in use and the keyboard was loading. The
+first time this process renders a CoreUI "styled image" it creates the process-wide shared
+`CIContext`, and that construction segfaults on this device/OS. Our own code never appears in the
+stack, and the entitlements are not implicated: the same process had already read `Photos.sqlite`
+successfully.
+
+**How wide is the trigger?** The captured stack enters through `UITextSelectionInteraction
+_handleMultiTapGesture:` — a **multi-tap inside a text field** (for example a double tap to select a
+word), which is what activates the field and loads the keyboard. Whether a plain single tap followed
+by typing is also enough **was not established**; the 0.2.0 exports that exist were produced through
+a text field, so typing itself was evidently possible at least once. Treat "showing the keyboard"
+as the mechanism on the crash path, and "multi-tap in a text field" as the confirmed trigger.
 
 **Not established:** whether the keyboard is the only trigger. Every UIKit surface that renders a
 styled image (SF Symbols, share sheets, alerts) goes through the same `CUIShapeEffectStack` path,
@@ -178,6 +192,69 @@ Corrections carried in 0.2.1:
 - `ZASSET.ZMASTER` and `ZASSET.ZIMPORTSESSION` are referenced by columns but are not tables on
   iOS 15, so child tables are discovered from the schema instead of a hard-coded join list.
 
+## Phase 2 — first comparison attempt (2026-09-22, evening)
+
+Evidence: `logs/detail_heif_converted.txt` and `logs/detail_png_original.txt`, analysed with
+`tools/diff_dumps.py` and `tools/dump_view.py`.
+
+### The pair of exports does not contain the comparison that was intended
+
+| file | search term | matches | what was dumped in full |
+| --- | --- | --- | --- |
+| `detail_heif_converted.txt` | `5691` | 1 | Z_PK 5691 `IMG_5701.HEIC` ✔ |
+| `detail_png_original.txt` | **`5`** | 20 | the first 5, and those 5 are **HEIC** (`IMG_5697`…`IMG_5701`) |
+
+The term `5` matched every file name containing a `5`, and because the list is ordered by
+`Z_PK DESC` the five fully dumped assets are the newest HEICs. The PNG assets
+(`IMG_5696.PNG`, `IMG_5695.PNG`, `IMG_5694.PNG`, `IMG_5693.PNG`) appear **only as one-line
+headers, with no field data at all**.
+
+**Therefore the intended PNG ↔ HEIC field comparison has not been performed yet.** It needs a
+re-export of the PNG asset. This is a repeat of the failure mode that motivated removing the text
+field: a search term that silently matches something else.
+
+### Findings that the files DO support
+
+1. **Determinism control.** The same asset (5691) was dumped into both files. Of ~280 fields only
+   two differ: `ZADDITIONALASSETATTRIBUTES.Z_OPT` 5 → 7 and `ZPENDINGVIEWCOUNT` 2 → 4. The
+   difference is the database changing (the photo was viewed between the two dumps), not the dump
+   being unstable.
+2. **The five new HEICs are one batch from a third-party importer.** All five carry
+   `ZIMPORTEDBYBUNDLEIDENTIFIER = com.example.PNG2HEIF`, `ZIMPORTEDBYDISPLAYNAME = PNG2HEIF`,
+   `ZIMPORTEDBY = 3`, `ZDATECREATEDSOURCE = 3`, all are 1242 × 2208 in `DCIM/105APPLE`, and four of
+   the five are in the trash (`ZTRASHEDSTATE = 1`); only `IMG_5701.HEIC` is live.
+3. **`ZORIGINALHASH` is a placeholder, not a digest.** All five files, whose sizes differ
+   (23 800 … 182 684 bytes), carry the identical 8-byte blob `66616b6568617368` = ASCII
+   `fakehash`. A real hash of five different files cannot be equal, so this value was written by the
+   importer or by the test setup. **Any conclusion that relies on `ZORIGINALHASH` is void until this
+   is explained.**
+4. **No camera/lens data and no "screenshot" string anywhere.** In the full 2862-line dump every
+   EXIF-derived field is NULL — `ZCAMERAMAKE`, `ZCAMERAMODEL`, `ZLENSMODEL`, `ZISO`, `ZAPERTURE`,
+   `ZSHUTTERSPEED`, `ZFOCALLENGTH`, `ZFOCALLENGTHIN35MM`, `ZWHITEBALANCE`, `ZMETERINGMODE`,
+   `ZDIGITALZOOMRATIO`, `ZEXPOSUREBIAS`, `ZCODEC`, `ZLATITUDE`, `ZLONGITUDE` — and the only
+   non-NULL one is `ZFLASHFIRED = 0`. No field value contains `screen` / `screenshot`.
+   So an imported asset that has **no camera information at all** is still not a screenshot: absence
+   of lens data cannot be the rule. A screenshot would have to be a *positive* declaration, which is
+   the user's hypothesis — and it is still untested.
+5. **`ZKINDSUBTYPE` is not the file extension.** On the same device an older HEIC
+   (`IMG_5690.HEIC`, Z_PK 5681, from the first `Asset list`) sits in `ZKINDSUBTYPE = 2`, while these
+   five **HEIC** files sit in `ZKINDSUBTYPE = 0` — the same group as `IMG_5684.JPG`. Candidate
+   explanations to test, not conclusions: the importer may write the asset record itself (see the
+   fake hash), or the value follows the coded codec inside the container rather than the container.
+6. `ZINTERNALRESOURCE.ZQUALITYSORTVALUE` is `2147418120` (= `0x7FFFC008`, a NaN float bit pattern)
+   for all five. Recorded only because it is identical for five different files; unaffected by any
+   conclusion yet.
+
+### What this means for the hypothesis
+
+The hypothesis under test is *"iPhone writes 'this is a screenshot' into the lens information, and
+that is why Photos accepts it as a screenshot"*. Nothing in these two exports can support or refute
+it, because neither export contains a real screenshot, and the "PNG" export contains no PNG data.
+What the exports do establish is the shape of the search space: for these imported assets the only
+classification-shaped columns are `ZKIND` / `ZKINDSUBTYPE` / `ZSAVEDASSETTYPE` (all constant
+`0 / 0 / 3` for the batch) plus the EXIF-derived fields — and the EXIF-derived fields are empty.
+
+
 ## Things NOT established yet
 
 The following are hypotheses, not findings:
@@ -190,18 +267,31 @@ The following are hypotheses, not findings:
 - that modifying Photos.sqlite would survive Photos daemon reconciliation
 - that a read-only SQLite connection sees the contents of the present `-wal` file
 - that the keyboard is the only way to trigger the CoreImage crash
+- that `ZKINDSUBTYPE` follows the coded codec rather than the container (see finding 5 above)
+- that the PNG2HEIF importer goes through the Photos framework rather than writing rows itself
+  (its assets carry `ZIMPORTEDBY = PNG2HEIF` and a `fakehash` placeholder, so this has to be
+  answered before those assets are used as evidence)
+- that the screenshot classification is written into the file's camera/lens metadata (the user's
+  working hypothesis; **no sample that can test it has been dumped yet**)
 
 Do not turn any of these into project facts without device evidence.
 
 ## Next experiment
 
-1. Install 0.2.1, open `Asset Inspector`, confirm the table loads and nothing crashes.
-2. Cheap falsification test for the crash: reinstall or relaunch 0.2.0 and tap a text field once.
-   If it crashes again with the same `CI::GLContext` stack the keyboard trigger is deterministic;
-   if not, the failure was environmental (memory / GPU) and the "keyboard" explanation is too narrow.
-3. Prepare samples on the device: A native screenshot, B imported PNG, C imported HEIF/JPEG.
-   They appear at the top of the asset table because it is ordered by `Z_PK DESC`.
-4. Select A, B, C → `Compare` → export. `Detail` on each if the diff needs more context.
+1. **Re-export the PNG asset properly.** The previous export searched `5` and only dumped HEICs.
+   In `Assets`, tap the row of the source PNG → `Detail` → `Share`, or select it together with the
+   HEIC and use `Compare` (no typing). Only then is the PNG ↔ HEIC field diff actually performed.
+2. **Dump a real native screenshot** (power + volume up). This is the only sample that can test the
+   camera/lens hypothesis; nothing dumped so far contains a screenshot.
+3. **Dump a control HEIC imported by another route** (`IMG_5690.HEIC`, Z_PK 5681, `ZKINDSUBTYPE=2`)
+   and compare it with `IMG_5701.HEIC` (`ZKINDSUBTYPE=0`) to test finding 5.
+4. In the Photos UI, record for every sample whether it appears under **Screenshots**. That is the
+   ground truth for the classification and it costs nothing.
+5. Answer how PNG2HEIF imports (Photos framework or direct database write). If it writes rows
+   itself, its assets say nothing about Photos' own classification logic.
+6. Keep the dumps out of the trash and out of the moment/highlight comparisons: four of the five
+   HEICs in this batch are trashed, which perturbs `ZTRASHEDSTATE`, `ZTRASHEDDATE`, `ZMOMENT` and
+   the `ZHIGHLIGHTBEING*` columns.
 
 For every candidate field record: database path, table, primary key, column name, value per sample,
 whether the difference is stable across more samples, and whether the value is *derivable from the
