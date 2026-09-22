@@ -31,7 +31,7 @@ static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
 @property(nonatomic, copy) NSString *reportName;
 @property(nonatomic, copy) NSString *reportText;
 @property(nonatomic, strong) UITextView *output;
-@property(nonatomic, strong) UIButton *copyButton;
+@property(nonatomic, strong) UIButton *clipboardButton;
 @property(nonatomic, strong) UIButton *shareButton;
 @end
 
@@ -42,9 +42,9 @@ static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
     self.title = self.reportName.length ? self.reportName : @"Report";
     self.view.backgroundColor = UIColor.systemBackgroundColor;
 
-    self.copyButton = MakeButton(@"Copy", self, @selector(copyReport:));
+    self.clipboardButton = MakeButton(@"Copy", self, @selector(putInClipboard:));
     self.shareButton = MakeButton(@"Share…", self, @selector(shareReport:));
-    UIStackView *buttons = MakeButtonRow(@[self.copyButton, self.shareButton]);
+    UIStackView *buttons = MakeButtonRow(@[self.clipboardButton, self.shareButton]);
     buttons.translatesAutoresizingMaskIntoConstraints = NO;
 
     self.output = [UITextView new];
@@ -68,7 +68,9 @@ static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
     ]];
 }
 
-- (void)copyReport:(id)sender {
+/* Not named -copy...: a "copy" prefix puts the method in the ObjC copy method family,
+   which ARC requires to return an owned object. */
+- (void)putInClipboard:(id)sender {
     UIPasteboard.generalPasteboard.string = self.reportText ?: @"";
     NSString *previous = self.title;
     self.title = @"Copied to clipboard";
