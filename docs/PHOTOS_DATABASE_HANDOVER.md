@@ -13,10 +13,11 @@
   (see the regression section). Fixed in **0.2.2**, pinned by `tools/repro_search_bug.py`, and
   **confirmed on the device**: the 19:07 compare shows `exact Z_PK = 5691` and `exact Z_PK = 5`
   resolving to exactly the two selected rows.
-- Second sample comparison: `DONE, BUT CONFOUNDED` — screenshot-side PNG vs its HEIC conversion;
-  see its own section. The camera/lens part of the hypothesis is answered for this sample, the
-  `ZKINDSUBTYPE` part is not.
-- Sample comparison of A/B/C: **`PARTIAL`**.
+- Second sample comparison: `DONE, BUT CONFOUNDED` — screenshot-side PNG vs its HEIC conversion.
+- Third sample comparison: `DONE, AGE-MATCHED`. 42 differing fields instead of 331. Leaves exactly
+  one candidate (`ZKINDSUBTYPE` 10 vs 0) that still carries an unresolved confound, retracts the
+  `ZORIGINALHASH` reading, and identifies the missing positive control.
+- Sample comparison of A/B/C: **`DONE for the DB side; needs a camera-photo control`**.
 
 **Observability gap:** the dump preamble does not record the app version, so it is impossible to tell
 from a dumped text which build produced it. Worth adding to `filePreamble` in the next build.
@@ -405,15 +406,104 @@ few lines that matter. A warning when the two assets' `ZADDEDDATE` differ by mor
 would flag the age confound automatically.
 
 
+## Third comparison: age-matched, three samples (2026-09-22 19:18)
+
+Evidence: the asset dump of Z_PK 5696 and the `ASSET COMPARE` of 5696 / 5693 / 5684.
+
+### The age confound is gone, and the noise dropped 8×
+
+| | A = 5696 | B = 5693 | C = 5684 |
+| --- | --- | --- | --- |
+| file | IMG_5706.PNG | IMG_5703.HEIC | IMG_5694.PNG |
+| imported by | `com.heytap.oshare-export` (O+互联) | `com.example.PNG2HEIF` | **`com.apple.springboard` (SpringBoard)** |
+| added (UTC) | 11:17:13 | 11:14:49 | 10:13:43 |
+| container | public.png, sRGB | public.heic, Display P3 | public.png, Display P3 |
+| pixels | 1080 × 2338 | 1242 × 2208 | 1242 × 2208 |
+| original file name | `comment_<hash>.png` | IMG_5703.HEIC | IMG_5694.PNG |
+| **`ZKINDSUBTYPE`** | **0** | **0** | **10** |
+| `ZKIND` / `ZSAVEDASSETTYPE` | 0 / 3 | 0 / 3 | 0 / 3 |
+| `ZDATECREATEDSOURCE` | 3 | 3 | **1** |
+| `ZEXIFTIMESTAMPSTRING` | (null) | (null) | **2026:09:22 18:13:40** |
+| `ZINTERNALRESOURCE.ZCOMPACTUTI` | 6 | 3 | 6 |
+| `ZDATASTOREKEYDATA` | `…4003` | `…c001` | `…4003` |
+| `ZQUALITYSORTVALUE` | `…122` | `…120` | `…122` |
+| camera / lens block | all NULL | all NULL | all NULL |
+
+- 42 fields differ out of 280, 238 identical — against 331 of 536 for the previous, age-confounded
+  pair. Same-day assets are the right instrument; 14 months apart is not.
+- The whole `ZEXTENDEDATTRIBUTES` block again appears in the diff only as `Z_PK` / `ZASSET`, so the
+  **SpringBoard-imported PNG has no camera or lens information either**. Third sample, same result.
+
+### The only non-identity difference that could be the classification
+
+A and C are **both PNG, imported an hour apart, both `ZCOMPACTUTI` 6**. What separates them:
+
+- C is the SpringBoard import (a screenshot); A is an app import from O+互联
+- C carries a file creation timestamp (`ZEXIFTIMESTAMPSTRING`), A does not — hence
+  `ZDATECREATEDSOURCE` 1 vs 3
+
+`ZKINDSUBTYPE` is 10 for C and 0 for A, so it **does not encode the container** (two PNGs, two
+values). But this pair changes *screenshot-ness and timestamp presence together*, so it still cannot
+say which of them sets the field. Both readings stay open:
+
+- **H1, "10 = screenshot"**: C is SpringBoard's screenshot, and `Z_PK 5` — also a SpringBoard PNG,
+  from 2025-07-12 — is 10 as well.
+- **H2, "10 = the original file carried a creation timestamp"**: 10 co-varies with
+  `ZEXIFTIMESTAMPSTRING` and with `ZDATECREATEDSOURCE` 1-vs-3 across every sample that has both.
+
+### Retraction: `ZORIGINALHASH` is a device-wide placeholder, not an importer artefact
+
+This dump shows `ZORIGINALHASH = (blob 8 bytes) 66616b6568617368` = ASCII **`fakehash`** for an asset
+imported by a *different* app (`com.heytap.oshare-export`). Combined with `ZORIGINALHASH` never
+appearing in any of the three comparisons, the same value is on **every asset we have looked at**:
+9+ assets, 3 unrelated importers, 14 months — including the year-old `Z_PK 5`.
+
+The earlier reading *"the importer wrote a placeholder"* is **RETRACTED**. It is not the importer
+(two unrelated importers cannot agree byte for byte) and it is not "not computed yet" (the year-old
+asset has it too). Something on this device writes `fakehash` into every asset, which points at a
+patched Photos import path or a jailbreak tweak. **Until that is explained this column is void — and
+a patched import path could be writing other columns too, which would put every conclusion drawn
+from this device in doubt.** By contrast `ZMASTERFINGERPRINT` / `ZFINGERPRINT` behave the way a
+pipeline does: null on today's assets, a real base64 SHA-1 on the year-old `Z_PK 5`.
+
+### Missing control: the camera columns have never been seen populated
+
+Every asset dumped so far has an empty camera/lens block, which makes "empty" a weak observation —
+we do not know that this device's Photos ever fills them. **Before drawing anything from the
+emptiness, dump one photograph taken with the camera** (`ZKINDSUBTYPE` 2 per the census) and check
+whether `ZCAMERAMAKE` / `ZCAMERAMODEL` / `ZLENSMODEL` / `ZISO` / `ZAPERTURE` carry values.
+
+### Next experiments, in the order that decides the most
+
+1. **Positive control on the camera columns.** Dump a camera photo. If its camera fields are
+   populated, the emptiness for screenshots becomes meaningful; if it is empty too, the whole
+   lens-metadata branch is moot on this device.
+2. **Same screenshot file, two import paths.** Take a screenshot (SpringBoard, expect 10), then get
+   that same PNG into Photos through Files / AirDrop. If the second copy is also 10, the marker
+   travels with the file; if it is 0, SpringBoard's import path declared it. This is the direct test
+   of "the file declares itself a screenshot".
+3. **A non-screenshot PNG carrying a creation timestamp.** If it lands on 10, then
+   `ZKINDSUBTYPE = 10` means "the file carried a timestamp", not "screenshot".
+4. **Find out what writes `fakehash`** — tweak inventory, or search the jailbreak file system for
+   the string.
+
+### Product improvement (still not shipped)
+
+Unchanged: split the report into "values differ" versus "row missing on one side", and warn when the
+two assets' `ZADDEDDATE` differ by more than a few minutes. The age-matched run shows how much noise
+that would have removed automatically.
+
+
 ## Things NOT established yet
 
 The following are hypotheses, not findings:
 
 - that a field named `ZSCREENTYPE` exists on iOS 15 (the scan found none)
 - that `ZSCREENTIMEDEVICEIMAGESENSITIVITY` has anything to do with screenshots (`-1`, "not computed")
-- that `ZKINDSUBTYPE=10` means "screenshot" rather than "PNG"
-- that `ZADDITIONALASSETATTRIBUTES.ZDATECREATEDSOURCE` is a classification rather than a note about
-  which metadata the creation date came from
+- that `ZKINDSUBTYPE=10` means "screenshot" rather than "the original file carried a creation
+  timestamp"; the age-matched pair cannot separate the two
+- that `ZADDITIONALASSETATTRIBUTES.ZDATECREATEDSOURCE` is a classification (it tracks where the
+  creation date came from: file metadata 1, import time 3 — consistent across every sample so far)
 - that one field alone controls the Screenshot classification
 - that the classification lives in `ZASSET` or in `ZADDITIONALASSETATTRIBUTES`
 - that modifying Photos.sqlite would survive Photos daemon reconciliation
@@ -421,35 +511,39 @@ The following are hypotheses, not findings:
 - that the keyboard is the only way to trigger the CoreImage crash
 - that `ZKINDSUBTYPE` follows the coded codec rather than the container
 - that the PNG2HEIF importer goes through the Photos framework rather than writing rows itself
-- that `IMG_0005.PNG` really is a native screenshot (SpringBoard import is strong evidence, not proof)
+- that `IMG_0005.PNG` / `IMG_5694.PNG` really are native screenshots (a SpringBoard import is strong
+  evidence, not proof)
 - that the screenshot classification is written into the file's camera/lens metadata (the user's
-  working hypothesis). **The database side is now answered for one sample: a SpringBoard-imported
-  PNG has every camera/lens column empty, exactly like an ordinary import.** What is left is a
-  file-level question.
+  hypothesis). The database side is answered for three samples — a SpringBoard-imported PNG has
+  every camera/lens column empty, exactly like an ordinary import — but **we still lack a positive
+  control showing that this device fills those columns at all**
+- that the camera/lens columns are ever populated on this device (no camera photo has been dumped)
+- that this device's Photos import path is unpatched. Every asset carries the identical
+  `ZORIGINALHASH = "fakehash"`, which no stock Photos behaviour explains
 
 Do not turn any of these into project facts without device evidence.
 
 ## Next experiment
 
-1. **Age-matched pair first.** Take a fresh screenshot and import a fresh copy of something else,
-   then dump both immediately: neither has analysis rows yet, so nothing can be blamed on the
-   processing pipeline. This is the single most useful next step.
-2. **Format held constant.** Dump a non-screenshot PNG (imported through Files / AirDrop). If it is
-   also `ZKINDSUBTYPE = 10`, then 10 means "PNG"; if it is 0, 10 starts to look like the marker.
-3. **File level.** Copy `IMG_0005.PNG` off the device and inspect the bytes for an Apple-specific
-   chunk / EXIF marker. The database holds nothing for it, so a file-level declaration can only be
-   found there.
-4. In the Photos UI, record for every sample whether it appears under **Screenshots**. That is the
-   ground truth for the classification and it costs nothing.
-5. Answer how PNG2HEIF imports (Photos framework or direct database write). If it writes rows
-   itself, its assets say nothing about Photos' own classification logic.
-6. Re-export the source PNG's `Detail` (the first attempt exported HEICs). Check the `lookup :` and
-   `first match :` lines before trusting a dump.
-7. A control HEIC imported by another route (`IMG_5690.HEIC`, Z_PK 5681, `ZKINDSUBTYPE=2`) compared
-   with `IMG_5701.HEIC` (`ZKINDSUBTYPE=0`) would test whether the subtype follows the coded codec.
-8. Keep samples out of the trash and out of the moment/highlight comparisons: four of the five HEICs
-   in the PNG2HEIF batch are trashed, which perturbs `ZTRASHEDSTATE`, `ZTRASHEDDATE`, `ZMOMENT` and
-   the `ZHIGHLIGHTBEING*` columns.
+1. **Positive control on the camera columns.** Dump one photograph taken with the camera
+   (`ZKINDSUBTYPE = 2` per the census) and check whether `ZCAMERAMAKE` / `ZCAMERAMODEL` /
+   `ZLENSMODEL` / `ZISO` / `ZAPERTURE` carry values. Without this, "the camera block is empty" says
+   nothing, because no sample has ever shown it populated.
+2. **Same screenshot file, two import paths.** Screenshot it (SpringBoard → expect `ZKINDSUBTYPE`
+   10), then get that same PNG into Photos through Files / AirDrop. Copied in as 10 ⇒ the marker
+   travels with the file; copied in as 0 ⇒ SpringBoard's import path declared it.
+3. **A non-screenshot PNG that carries a creation timestamp.** If it lands on 10, then
+   `ZKINDSUBTYPE = 10` means "the file carried a timestamp", not "screenshot".
+4. **Explain `fakehash`.** Tweak inventory, or search the jailbreak file system for the string.
+   Until then, treat every conclusion from this device as provisional.
+5. Keep comparing assets **added within the same hour**. The age-matched run cut the diff from 331
+   fields to 42; the older comparison was mostly measuring the analysis pipeline.
+6. In the Photos UI, record for every sample whether it appears under **Screenshots** — the ground
+   truth for the classification, and it costs nothing.
+7. Answer how PNG2HEIF and O+互联 import (Photos framework or direct database write).
+8. Keep samples out of the trash and out of moment/highlight comparisons: four of the five HEICs in
+   the PNG2HEIF batch are trashed, which perturbs `ZTRASHEDSTATE`, `ZTRASHEDDATE`, `ZMOMENT` and the
+   `ZHIGHLIGHTBEING*` columns.
 
 For every candidate field record: database path, table, primary key, column name, value per sample,
 whether the difference is stable across more samples, and whether the value is *derivable from the
