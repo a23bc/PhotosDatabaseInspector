@@ -1,0 +1,4 @@
+build/
+.trash/
+.DS_Store
+*.xcuserstate

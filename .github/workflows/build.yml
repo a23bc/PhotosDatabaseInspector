@@ -1,0 +1,27 @@
+name: Build TIPA
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+      - name: Build and package
+        run: make package
+      - name: Verify artifact
+        run: |
+          test -f build/PhotosDatabaseInspector.tipa
+          unzip -l build/PhotosDatabaseInspector.tipa
+      - name: Upload TIPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotosDatabaseInspector-tipa
+          path: build/PhotosDatabaseInspector.tipa
+          if-no-files-found: error
