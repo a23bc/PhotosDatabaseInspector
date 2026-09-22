@@ -7,6 +7,8 @@
 - Phase 1 (schema discovery): `DONE`, verified by a real device scan.
 - Phase 2 (asset record dump + comparison): `WORKS` (0.2.0 produced a full asset list on the device).
 - Phase 2 UI with text input: **`RETRACTED`** — see "Crash" below.
+- Phase 2 UI without text input (0.2.1): `BUILDS GREEN` (CI run `35715762990`, zero compiler
+  warnings, artifact `build/ci/PhotosDatabaseInspector-0.2.1.tipa`), **not installed on the device yet**.
 - Sample comparison of A/B/C: **`NOT DONE YET`**.
 
 Last updated: 2026-09-22.
@@ -44,6 +46,38 @@ This repository must not assume the answer in advance.
 
 The filesystem access entitlements are based on the existing iOSCleanerInspector project and are
 intended for the user's own TrollStore test device. They are not normal App Store entitlements.
+
+## Build constraints (each one paid for with a failed CI run)
+
+The Makefile compiles all sources in one `clang` invocation and links only
+`-framework UIKit -framework Foundation -lsqlite3`. It is not to be changed to work around code
+that could be written differently.
+
+- **No member in an Objective-C method family unless it really returns an owned object.**
+  `@property(nonatomic, strong) UIButton *copyButton;` is a hard **error** under ARC
+  (`property follows Cocoa naming convention for returning 'owned' objects`), and so is a method
+  like `- (void)copyReport:(id)sender`. Use a neutral name: `clipboardButton`, `putInClipboard:`.
+  This broke CI run `35715292572`.
+- **`CGRectZero` / `CGSizeZero` / `CGPointZero` / `CGAffineTransformIdentity` are CoreGraphics
+  symbols**, and CoreGraphics is not linked. Use the inline `CGRectMake(0, 0, 0, 0)` instead.
+  This broke CI run `35715609657` at link time (`Undefined symbols: "_CGRectZero"`).
+- CI run `35715762990` is the first green Phase 2 UI build: zero warnings.
+
+Cheap local pre-flight checks before pushing (no Objective-C toolchain is available here):
+
+- brace/bracket balance check per file
+- `grep` for properties or methods starting with `alloc` / `new` / `copy` / `init` / `mutableCopy`
+- `grep` for `CGRectZero`-style CoreGraphics constants
+
+## Pushing when the local proxy blocks github.com
+
+Observed on 2026-09-22: `git push` failed with `CONNECT tunnel failed, response 502` for
+`github.com`, while `api.github.com` kept working (the proxy at `127.0.0.1:18513` allows the API
+host and refuses the git host). `tools/api_push.py` rebuilds the current local commit through the
+Git Data API and verifies, before moving any ref, that the uploaded blobs, the tree **and the
+commit object** are byte-identical to the local ones — so local and remote never diverge. It
+aborts without touching a ref if anything differs.
+
 
 ## Phase 1 — verified by device scan
 

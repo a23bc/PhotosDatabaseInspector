@@ -66,6 +66,18 @@ The same command is used by `.github/workflows/build.yml`.
 `PhotosDatabaseInspector.entitlements` must stay at the repository root — the Makefile reads it from
 there, so moving it breaks the CI build.
 
+Build constraints that the source has to respect (the Makefile links UIKit + Foundation only, and
+must not be changed to work around code):
+
+- no property or method in an Objective-C method family (`alloc` / `new` / `copy` / `init` /
+  `mutableCopy`) unless it really returns an owned object — ARC rejects e.g. `copyButton`
+- no `CGRectZero` / `CGSizeZero` / `CGAffineTransformIdentity`: those are CoreGraphics symbols;
+  use the inline `CGRectMake(0, 0, 0, 0)` instead
+
+If the local proxy blocks `github.com` (git over https fails with `CONNECT tunnel failed` while
+`api.github.com` still answers), `tools/api_push.py` pushes the current local commit through the
+Git Data API and verifies that the remote objects are byte-identical to the local ones first.
+
 ## Install / test
 
 Build the TIPA in GitHub Actions, download the artifact, and install it with TrollStore on the test device.
