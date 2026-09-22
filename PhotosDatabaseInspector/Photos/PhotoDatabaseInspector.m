@@ -99,8 +99,14 @@ static NSString *ValueText(sqlite3_stmt *st, int idx) {
     switch (sqlite3_column_type(st, idx)) {
         case SQLITE_NULL:
             return @"(null)";
-        case SQLITE_INTEGER:
-            return [NSString stringWithFormat:@"%lld", sqlite3_column_int64(st, idx)];
+        case SQLITE_INTEGER: {
+            long long v = sqlite3_column_int64(st, idx);
+            /* SQLite NUMERIC affinity stores a whole-valued REAL as INTEGER, so a Core Data
+               date can come back as either type. Both are printed as a date. */
+            if ([decl isEqualToString:@"TIMESTAMP"])
+                return [NSString stringWithFormat:@"%lld   <- %@", v, CDDate((double)v)];
+            return [NSString stringWithFormat:@"%lld", v];
+        }
         case SQLITE_FLOAT: {
             double v = sqlite3_column_double(st, idx);
             if ([decl isEqualToString:@"TIMESTAMP"])
@@ -221,6 +227,44 @@ static NSArray<NSArray<NSString *> *> *SnapshotPairsFromRecords(NSArray<PDRecord
             [pairs addObject:@[[NSString stringWithFormat:@"%@.%@", prefix, r.columns[i]], r.values[i]]];
     }
     return pairs;
+}
+
+/* Which (ZKIND, ZKINDSUBTYPE, ZSAVEDASSETTYPE) combinations exist and how many rows each has.
+   This is the cheapest way to see whether screenshots form their own group. */
+static void AppendCensus(NSMutableString *out, sqlite3 *db, NSArray<NSString *> *assetCols) {
+    for (NSString *col in @[@"ZKIND", @"ZKINDSUBTYPE", @"ZSAVEDASSETTYPE"]) {
+        if (![assetCols containsObject:col]) {
+            [out appendFormat:@"\nclass census skipped: ZASSET has no %@ column\n", col];
+            return;
+        }
+    }
+    [out appendString:@"\nZASSET CLASS CENSUS (grouped by ZKIND / ZKINDSUBTYPE / ZSAVEDASSETTYPE)\n"];
+    [out appendString:@"---------------------------------------------------------------------------\n"];
+    [out appendString:@"  ZKIND  ZKINDSUBTYPE  ZSAVEDASSETTYPE  COUNT    sample file\n"];
+    NSString *sql = @"SELECT IFNULL(ZKIND,-1), IFNULL(ZKINDSUBTYPE,-1), IFNULL(ZSAVEDASSETTYPE,-1), COUNT(*) "
+                     "FROM \"ZASSET\" GROUP BY 1,2,3 ORDER BY COUNT(*) DESC";
+    sqlite3_stmt *cs = NULL;
+    if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &cs, NULL) == SQLITE_OK) {
+        while (sqlite3_step(cs) == SQLITE_ROW) {
+            long long kind = sqlite3_column_int64(cs, 0);
+            long long sub = sqlite3_column_int64(cs, 1);
+            long long saved = sqlite3_column_int64(cs, 2);
+            long long count = sqlite3_column_int64(cs, 3);
+            NSString *sample = @"";
+            sqlite3_stmt *ss = NULL;
+            NSString *sampleSQL = @"SELECT ZFILENAME FROM \"ZASSET\" WHERE IFNULL(ZKIND,-1)=?1 AND IFNULL(ZKINDSUBTYPE,-1)=?2 AND IFNULL(ZSAVEDASSETTYPE,-1)=?3 LIMIT 1";
+            if (sqlite3_prepare_v2(db, sampleSQL.UTF8String, -1, &ss, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(ss, 1, kind);
+                sqlite3_bind_int64(ss, 2, sub);
+                sqlite3_bind_int64(ss, 3, saved);
+                if (sqlite3_step(ss) == SQLITE_ROW) sample = Flat(S(sqlite3_column_text(ss, 0)));
+            }
+            sqlite3_finalize(ss);
+            [out appendFormat:@"  %-6lld %-13lld %-16lld %-8lld %@\n", kind, sub, saved, count, sample];
+        }
+    }
+    sqlite3_finalize(cs);
+    [out appendString:@"  (-1 means the column is NULL for that row)\n"];
 }
 
 #pragma mark - Inspector
@@ -480,37 +524,8 @@ static NSArray<NSArray<NSString *> *> *SnapshotPairsFromRecords(NSArray<PDRecord
     [out appendFormat:@"\nZASSET total rows : %lld\n", total];
     [out appendFormat:@"related tables   : %lu -> %@\n", (unsigned long)related.count, [related componentsJoinedByString:@", "]];
 
-    /* Census: which (ZKIND, ZKINDSUBTYPE, ZSAVEDASSETTYPE) combinations exist, and how many rows each has.
-       This is the cheapest way to see whether screenshots form their own group. */
-    NSMutableArray<NSString *> *censusCols = [NSMutableArray array];
-    for (NSString *col in @[@"ZKIND", @"ZKINDSUBTYPE", @"ZSAVEDASSETTYPE"])
-        if ([assetCols containsObject:col]) [censusCols addObject:col];
-    if (censusCols.count == 3) {
-        [out appendString:@"\nZASSET CLASS CENSUS (grouped by ZKIND / ZKINDSUBTYPE / ZSAVEDASSETTYPE)\n"];
-        [out appendString:@"---------------------------------------------------------------------------\n"];
-        [out appendString:@"  ZKIND  ZKINDSUBTYPE  ZSAVEDASSETTYPE  COUNT    sample file\n"];
-        NSString *sql = @"SELECT IFNULL(ZKIND,-1), IFNULL(ZKINDSUBTYPE,-1), IFNULL(ZSAVEDASSETTYPE,-1), COUNT(*) "
-                         "FROM \"ZASSET\" GROUP BY 1,2,3 ORDER BY COUNT(*) DESC";
-        sqlite3_stmt *cs = NULL;
-        if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &cs, NULL) == SQLITE_OK) {
-            while (sqlite3_step(cs) == SQLITE_ROW) {
-                long long k = sqlite3_column_int64(cs, 0), sub = sqlite3_column_int64(cs, 1), saved = sqlite3_column_int64(cs, 2), n = sqlite3_column_int64(cs, 3);
-                NSString *sample = @"";
-                sqlite3_stmt *ss = NULL;
-                NSString *sampleSQL = @"SELECT ZFILENAME FROM \"ZASSET\" WHERE IFNULL(ZKIND,-1)=?1 AND IFNULL(ZKINDSUBTYPE,-1)=?2 AND IFNULL(ZSAVEDASSETTYPE,-1)=?3 LIMIT 1";
-                if (sqlite3_prepare_v2(db, sampleSQL.UTF8String, -1, &ss, NULL) == SQLITE_OK) {
-                    sqlite3_bind_int64(ss, 1, k); sqlite3_bind_int64(ss, 2, sub); sqlite3_bind_int64(ss, 3, saved);
-                    if (sqlite3_step(ss) == SQLITE_ROW) sample = Flat(S(sqlite3_column_text(ss, 0)));
-                }
-                sqlite3_finalize(ss);
-                [out appendFormat:@"  %-6lld %-13lld %-16lld %-8lld %@\n", k, sub, saved, n, sample];
-            }
-        }
-        sqlite3_finalize(cs);
-        [out appendString:@"  (-1 means the column is NULL for that row)\n"];
-    } else {
-        [out appendFormat:@"\nclass census skipped: ZASSET is missing some of %@\n", [@[@"ZKIND", @"ZKINDSUBTYPE", @"ZSAVEDASSETTYPE"] componentsJoinedByString:@", "]];
-    }
+    /* Census: which (ZKIND, ZKINDSUBTYPE, ZSAVEDASSETTYPE) combinations exist, and how many rows each has. */
+    AppendCensus(out, db, assetCols);
 
     /* Newest rows. */
     NSString *listSQL = [NSString stringWithFormat:@"SELECT * FROM \"ZASSET\" ORDER BY Z_PK DESC LIMIT %ld", (long)limit];
@@ -541,6 +556,87 @@ static NSArray<NSArray<NSString *> *> *SnapshotPairsFromRecords(NSArray<PDRecord
     [out appendString:@"then compare the three dumps field by field.\n"];
     sqlite3_close(db);
     return out;
+}
+
+#pragma mark Phase 2 : census only
+
+- (NSString *)assetCensusReport {
+    NSMutableString *out = [NSMutableString string];
+    [out appendString:@"ZASSET CENSUS - Photos.sqlite (Phase 2, READ-ONLY)\n"];
+    [out appendString:@"================================================\n\n"];
+    [out appendString:[self filePreamble]];
+
+    sqlite3 *db = NULL;
+    if (![self openReadOnly:&db into:out]) return out;
+    if (!TableExists(db, @"ZASSET")) {
+        [out appendString:@"\n[ZASSET] table not found - this is not a Photos asset database.\n"];
+        sqlite3_close(db);
+        return out;
+    }
+    NSArray<NSString *> *related = [self relatedTablesInDB:db from:[self tableNamesInDB:db]];
+    long long total = 0;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM \"ZASSET\"", -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) total = sqlite3_column_int64(st, 0);
+    }
+    sqlite3_finalize(st);
+
+    [out appendFormat:@"\nZASSET total rows : %lld\n", total];
+    [out appendFormat:@"related tables   : %lu -> %@\n", (unsigned long)related.count, [related componentsJoinedByString:@", "]];
+    AppendCensus(out, db, ColumnsOfTable(db, @"ZASSET"));
+    [out appendString:@"\nREMINDER\n--------\n"];
+    [out appendString:@"A group is a population, not a label. ZKINDSUBTYPE=10 may mean \"PNG\" rather than\n"];
+    [out appendString:@"\"screenshot\"; the column name is not evidence about what the value means.\n"];
+    sqlite3_close(db);
+    return out;
+}
+
+#pragma mark Phase 2 : structured list for the UI
+
+/* Keys: total (NSString), rows (NSArray of dictionaries keyed by ZASSET column name).
+   The UI needs rows, not a formatted report, so that samples can be chosen by tapping. */
+- (NSDictionary<NSString *, id> *)assetOverviewWithLimit:(NSInteger)limit {
+    NSMutableDictionary<NSString *, id> *result = [NSMutableDictionary dictionary];
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *rows = [NSMutableArray array];
+    result[@"total"] = @"0";
+    result[@"rows"] = rows;
+    result[@"count"] = @"0";
+
+    sqlite3 *db = NULL;
+    NSMutableString *log = [NSMutableString string];
+    if (![self openReadOnly:&db into:log]) {
+        result[@"error"] = log;
+        return result;
+    }
+    if (!TableExists(db, @"ZASSET")) {
+        result[@"error"] = @"[ZASSET] table not found - this is not a Photos asset database.";
+        sqlite3_close(db);
+        return result;
+    }
+
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM \"ZASSET\"", -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW)
+            result[@"total"] = [NSString stringWithFormat:@"%lld", sqlite3_column_int64(st, 0)];
+    }
+    sqlite3_finalize(st);
+
+    NSString *sql = [NSString stringWithFormat:@"SELECT * FROM \"ZASSET\" ORDER BY Z_PK DESC LIMIT %ld", (long)limit];
+    sqlite3_stmt *ls = NULL;
+    if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &ls, NULL) == SQLITE_OK) {
+        while (sqlite3_step(ls) == SQLITE_ROW) {
+            PDRecord *record = RecordFromStmt(ls, @"ZASSET");
+            NSMutableDictionary<NSString *, NSString *> *row = [NSMutableDictionary dictionary];
+            for (NSString *column in @[@"Z_PK", @"ZKIND", @"ZKINDSUBTYPE", @"ZSAVEDASSETTYPE",
+                                       @"ZUNIFORMTYPEIDENTIFIER", @"ZFILENAME", @"ZDATECREATED", @"ZUUID"])
+                row[column] = [record valueForColumn:column] ?: @"(null)";
+            [rows addObject:row];
+        }
+    }
+    sqlite3_finalize(ls);
+    result[@"count"] = [NSString stringWithFormat:@"%lu", (unsigned long)rows.count];
+    sqlite3_close(db);
+    return result;
 }
 
 #pragma mark Phase 2 : single asset dump

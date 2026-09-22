@@ -21,6 +21,13 @@ NS_ASSUME_NONNULL_BEGIN
 /* Phase 2: the newest `limit` ZASSET rows plus a grouped ZKIND/ZKINDSUBTYPE/ZSAVEDASSETTYPE census. */
 - (NSString *)assetListReportWithLimit:(NSInteger)limit;
 
+/* Phase 2: the grouped census on its own. */
+- (NSString *)assetCensusReport;
+
+/* Phase 2: structured asset list for a UI (keys: total, count, rows).
+   Each row is keyed by the ZASSET column name, so a UI can pick samples by tapping. */
+- (NSDictionary<NSString *, id> *)assetOverviewWithLimit:(NSInteger)limit;
+
 /* Phase 2: full record dump (ZASSET + every table referencing this asset) for each match.
    `search` may be a Z_PK, a ZUUID, a file name fragment or an original file name fragment.
    Pass nil/empty to dump the most recent asset. At most 5 assets are dumped in full. */

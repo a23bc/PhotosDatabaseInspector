@@ -4,98 +4,17 @@
 
 static NSString *const kDefaultPhotosDatabase = @"/var/mobile/Media/PhotoData/Photos.sqlite";
 
-#pragma mark - Phase 2 UI : asset inspector
+#pragma mark - Shared UI helpers
 
-@interface AssetInspectorViewController : UIViewController <UITextFieldDelegate>
-@property(nonatomic, strong) UITextField *pathField;
-@property(nonatomic, strong) UITextField *searchField;
-@property(nonatomic, strong) UIButton *listButton;
-@property(nonatomic, strong) UIButton *dumpButton;
-@property(nonatomic, strong) UIButton *compareButton;
-@property(nonatomic, strong) UIButton *exportButton;
-@property(nonatomic, strong) UITextView *output;
-@property(nonatomic, copy) NSString *report;
-@end
-
-@implementation AssetInspectorViewController
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.title = @"Asset Inspector";
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
-
-    self.pathField = [self makeField:@"database path" text:kDefaultPhotosDatabase];
-    self.pathField.keyboardType = UIKeyboardTypeURL;
-    self.searchField = [self makeField:@"filename / UUID / Z_PK - or A,B,C to compare" text:@""];
-
-    self.listButton = [self makeButton:@"Asset list" action:@selector(listAssets:)];
-    self.dumpButton = [self makeButton:@"Dump asset" action:@selector(dumpAsset:)];
-    self.compareButton = [self makeButton:@"Compare" action:@selector(compareAssets:)];
-    self.exportButton = [self makeButton:@"Export" action:@selector(export:)];
-    self.exportButton.enabled = NO;
-
-    UIStackView *row1 = [self buttonRow:@[self.listButton, self.dumpButton]];
-    UIStackView *row2 = [self buttonRow:@[self.compareButton, self.exportButton]];
-    UIStackView *actions = [[UIStackView alloc] initWithArrangedSubviews:@[row1, row2]];
-    actions.axis = UILayoutConstraintAxisVertical;
-    actions.spacing = 8;
-    actions.distribution = UIStackViewDistributionFillEqually;
-
-    self.output = [UITextView new];
-    self.output.editable = NO;
-    self.output.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
-    self.output.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
-    self.output.text = @"Asset Inspector - READ ONLY\n\n"
-                        "1. \"Asset list\"  : newest ZASSET rows + the ZKIND/ZKINDSUBTYPE/ZSAVEDASSETTYPE census\n"
-                        "2. \"Dump asset\"  : full record of one asset (ZASSET + every table referencing it)\n"
-                        "3. \"Compare\"     : field-by-field diff of several assets\n\n"
-                        "For 3., type the samples you prepared, e.g.  Screenshot.PNG,IMG_0002.PNG,IMG_0003.HEIC\n\n"
-                        "Nothing on this screen writes to the database: the file is opened read-only\n"
-                        "and the -wal/-shm sidecars are never touched.\n";
-
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[self.pathField, self.searchField, actions, self.output]];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 8;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:stack];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [stack.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:12],
-        [stack.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
-        [stack.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
-        [stack.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-12],
-        [self.pathField.heightAnchor constraintEqualToConstant:36],
-        [self.searchField.heightAnchor constraintEqualToConstant:36],
-        [actions.heightAnchor constraintEqualToConstant:96]
-    ]];
-}
-
-#pragma mark UI helpers
-
-- (UITextField *)makeField:(NSString *)placeholder text:(NSString *)text {
-    UITextField *field = [UITextField new];
-    field.placeholder = placeholder;
-    field.text = text;
-    field.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
-    field.borderStyle = UITextBorderStyleRoundedRect;
-    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    field.autocorrectionType = UITextAutocorrectionTypeNo;
-    field.spellCheckingType = UITextSpellCheckingTypeNo;
-    field.clearButtonMode = UITextFieldViewModeWhileEditing;
-    field.returnKeyType = UIReturnKeyGo;
-    field.delegate = self;
-    return field;
-}
-
-- (UIButton *)makeButton:(NSString *)title action:(SEL)action {
+static UIButton *MakeButton(NSString *title, id target, SEL action) {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     [button setTitle:title forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    button.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    [button addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
 }
 
-- (UIStackView *)buttonRow:(NSArray<UIView *> *)views {
+static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
     UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:views];
     row.axis = UILayoutConstraintAxisHorizontal;
     row.spacing = 8;
@@ -103,114 +22,328 @@ static NSString *const kDefaultPhotosDatabase = @"/var/mobile/Media/PhotoData/Ph
     return row;
 }
 
-- (void)setBusy:(BOOL)busy {
-    self.listButton.enabled = !busy;
-    self.dumpButton.enabled = !busy;
-    self.compareButton.enabled = !busy;
-    self.exportButton.enabled = !busy && self.report.length > 0;
+#pragma mark - Report screen
+
+/* Deliberately contains no text input and no alert: version 0.2.0 crashed inside CoreImage
+   the first time the keyboard was shown, so this screen only displays and exports text.
+   See docs/PHOTOS_DATABASE_HANDOVER.md. */
+@interface ReportViewController : UIViewController
+@property(nonatomic, copy) NSString *reportName;
+@property(nonatomic, copy) NSString *reportText;
+@property(nonatomic, strong) UITextView *output;
+@property(nonatomic, strong) UIButton *copyButton;
+@property(nonatomic, strong) UIButton *shareButton;
+@end
+
+@implementation ReportViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = self.reportName.length ? self.reportName : @"Report";
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+
+    self.copyButton = MakeButton(@"Copy", self, @selector(copyReport:));
+    self.shareButton = MakeButton(@"Share…", self, @selector(shareReport:));
+    UIStackView *buttons = MakeButtonRow(@[self.copyButton, self.shareButton]);
+    buttons.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.output = [UITextView new];
+    self.output.editable = NO;
+    self.output.selectable = NO;   /* no edit menu: keep this screen free of extra UIKit chrome */
+    self.output.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
+    self.output.text = self.reportText ?: @"";
+    self.output.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [self.view addSubview:buttons];
+    [self.view addSubview:self.output];
+    [NSLayoutConstraint activateConstraints:@[
+        [buttons.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:8],
+        [buttons.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
+        [buttons.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
+        [buttons.heightAnchor constraintEqualToConstant:40],
+        [self.output.topAnchor constraintEqualToAnchor:buttons.bottomAnchor constant:8],
+        [self.output.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:8],
+        [self.output.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-8],
+        [self.output.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-8]
+    ]];
 }
 
-- (void)alert:(NSString *)message {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Asset Inspector"
-                                                                   message:message
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-/* Runs a read-only inspection off the main thread. */
-- (void)runTitle:(NSString *)title operation:(NSString * (^)(void))operation {
-    [self setBusy:YES];
-    self.output.text = [NSString stringWithFormat:@"%@ …\n", title];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSString *report = operation();
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.report = report;
-            self.output.text = report;
-            [self setBusy:NO];
-        });
+- (void)copyReport:(id)sender {
+    UIPasteboard.generalPasteboard.string = self.reportText ?: @"";
+    NSString *previous = self.title;
+    self.title = @"Copied to clipboard";
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)1500000000), dispatch_get_main_queue(), ^{
+        self.title = previous;
     });
 }
 
-- (NSString *)resolvedPath {
-    NSString *path = [self.pathField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (!path.length) {
-        [self alert:@"Enter the path of a Photos SQLite database."];
-        return nil;
-    }
-    return path;
-}
-
-- (NSArray<NSString *> *)searchTerms {
-    NSString *text = self.searchField.text ?: @"";
-    NSArray<NSString *> *pieces = [text componentsSeparatedByCharactersInSet:
-                                   [NSCharacterSet characterSetWithCharactersInString:@",;"]];
-    NSMutableArray<NSString *> *terms = [NSMutableArray array];
-    for (NSString *piece in pieces) {
-        NSString *trimmed = [piece stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (trimmed.length) [terms addObject:trimmed];
-    }
-    return terms;
-}
-
-#pragma mark Actions
-
-- (void)listAssets:(id)sender {
-    NSString *path = [self resolvedPath];
-    if (!path) return;
-    [self runTitle:@"Reading ZASSET" operation:^NSString * {
-        PhotoDatabaseInspector *inspector = [[PhotoDatabaseInspector alloc] initWithDatabasePath:path];
-        return [inspector assetListReportWithLimit:50];
-    }];
-}
-
-- (void)dumpAsset:(id)sender {
-    NSString *path = [self resolvedPath];
-    if (!path) return;
-    NSString *term = [self searchTerms].firstObject;
-    if (!term.length) {
-        [self alert:@"Enter one filename, UUID or Z_PK number to dump."];
-        return;
-    }
-    [self runTitle:[NSString stringWithFormat:@"Dumping %@", term] operation:^NSString * {
-        PhotoDatabaseInspector *inspector = [[PhotoDatabaseInspector alloc] initWithDatabasePath:path];
-        return [inspector assetDumpReportForSearch:term];
-    }];
-}
-
-- (void)compareAssets:(id)sender {
-    NSString *path = [self resolvedPath];
-    if (!path) return;
-    NSArray<NSString *> *terms = [self searchTerms];
-    if (terms.count < 2) {
-        [self alert:@"Compare needs at least two comma-separated terms,\nfor example:  Screenshot.PNG,IMG_0002.PNG,IMG_0003.HEIC"];
-        return;
-    }
-    [self runTitle:[NSString stringWithFormat:@"Comparing %lu assets", (unsigned long)terms.count] operation:^NSString * {
-        PhotoDatabaseInspector *inspector = [[PhotoDatabaseInspector alloc] initWithDatabasePath:path];
-        return [inspector assetCompareReportForSearches:terms];
-    }];
-}
-
-- (void)export:(id)sender {
-    if (!self.report.length) return;
-    UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[self.report]
+- (void)shareReport:(id)sender {
+    if (!self.reportText.length) return;
+    UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[self.reportText]
                                                                          applicationActivities:nil];
     activity.modalPresentationStyle = UIModalPresentationPopover;
-    activity.popoverPresentationController.sourceView = self.exportButton;
-    activity.popoverPresentationController.sourceRect = self.exportButton.bounds;
+    activity.popoverPresentationController.sourceView = self.shareButton;
+    activity.popoverPresentationController.sourceRect = self.shareButton.bounds;
     [self presentViewController:activity animated:YES completion:nil];
-}
-
-- (BOOL)textFieldShouldReturn:(UITextField *)textField {
-    [textField resignFirstResponder];
-    if (textField == self.searchField) [self dumpAsset:nil];
-    return YES;
 }
 
 @end
 
-#pragma mark - Phase 1 UI : schema scanner
+#pragma mark - Asset row cell
+
+@interface AssetCell : UITableViewCell
+@property(nonatomic, strong) UILabel *line1;
+@property(nonatomic, strong) UILabel *line2;
+@end
+
+@implementation AssetCell
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    if ((self = [super initWithStyle:style reuseIdentifier:reuseIdentifier])) {
+        _line1 = [UILabel new];
+        _line1.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+        _line1.translatesAutoresizingMaskIntoConstraints = NO;
+        _line2 = [UILabel new];
+        _line2.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
+        _line2.textColor = UIColor.secondaryLabelColor;
+        _line2.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.contentView addSubview:_line1];
+        [self.contentView addSubview:_line2];
+        [NSLayoutConstraint activateConstraints:@[
+            [_line1.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:6],
+            [_line1.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:12],
+            [_line1.trailingAnchor constraintLessThanOrEqualToAnchor:self.contentView.trailingAnchor constant:-8],
+            [_line2.topAnchor constraintEqualToAnchor:_line1.bottomAnchor constant:2],
+            [_line2.leadingAnchor constraintEqualToAnchor:_line1.leadingAnchor],
+            [_line2.trailingAnchor constraintLessThanOrEqualToAnchor:self.contentView.trailingAnchor constant:-8]
+        ]];
+        self.selectionStyle = UITableViewCellSelectionStyleNone;
+    }
+    return self;
+}
+@end
+
+#pragma mark - Asset list screen
+
+@interface AssetListViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
+@property(nonatomic, strong) UITableView *table;
+@property(nonatomic, strong) UILabel *statusLabel;
+@property(nonatomic, strong) UIButton *moreButton;
+@property(nonatomic, strong) UIButton *censusButton;
+@property(nonatomic, strong) UIButton *detailButton;
+@property(nonatomic, strong) UIButton *compareButton;
+@property(nonatomic, strong) NSArray<NSDictionary<NSString *, NSString *> *> *rows;
+@property(nonatomic, strong) NSMutableIndexSet *selected;
+@property(nonatomic, copy) NSString *error;
+@property(nonatomic) NSInteger limit;
+@property(nonatomic, copy) NSString *total;
+@end
+
+@implementation AssetListViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Assets";
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.rows = @[];
+    self.selected = [NSMutableIndexSet indexSet];
+    self.limit = 50;
+    self.total = @"?";
+
+    self.statusLabel = [UILabel new];
+    self.statusLabel.numberOfLines = 3;
+    self.statusLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+    self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    self.table.dataSource = self;
+    self.table.delegate = self;
+    self.table.rowHeight = 48;
+    self.table.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.table registerClass:[AssetCell class] forCellReuseIdentifier:@"asset"];
+
+    self.moreButton = MakeButton(@"More", self, @selector(loadMore:));
+    self.censusButton = MakeButton(@"Census", self, @selector(showCensus:));
+    self.detailButton = MakeButton(@"Detail", self, @selector(showDetail:));
+    self.compareButton = MakeButton(@"Compare", self, @selector(compareSelected:));
+    UIStackView *row1 = MakeButtonRow(@[self.moreButton, self.censusButton]);
+    UIStackView *row2 = MakeButtonRow(@[self.detailButton, self.compareButton]);
+    row1.translatesAutoresizingMaskIntoConstraints = NO;
+    row2.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [self.view addSubview:self.statusLabel];
+    [self.view addSubview:self.table];
+    [self.view addSubview:row1];
+    [self.view addSubview:row2];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.statusLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:6],
+        [self.statusLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
+        [self.statusLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
+
+        [self.table.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:6],
+        [self.table.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.table.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.table.bottomAnchor constraintEqualToAnchor:row1.topAnchor constant:-6],
+
+        [row1.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
+        [row1.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
+        [row1.heightAnchor constraintEqualToConstant:40],
+
+        [row2.topAnchor constraintEqualToAnchor:row1.bottomAnchor constant:6],
+        [row2.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
+        [row2.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
+        [row2.heightAnchor constraintEqualToConstant:40],
+        [row2.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-6]
+    ]];
+
+    [self reload];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self updateStatus];
+}
+
+#pragma mark Loading
+
+- (void)setBusy:(BOOL)busy {
+    self.moreButton.enabled = !busy;
+    self.censusButton.enabled = !busy;
+    [self updateStatus];
+}
+
+- (void)reload {
+    [self setBusy:YES];
+    self.statusLabel.text = [NSString stringWithFormat:@"reading %ld rows from Photos.sqlite…", (long)self.limit];
+    NSInteger limit = self.limit;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        PhotoDatabaseInspector *inspector = [[PhotoDatabaseInspector alloc] initWithDatabasePath:kDefaultPhotosDatabase];
+        NSDictionary<NSString *, id> *overview = [inspector assetOverviewWithLimit:limit];
+        NSArray<NSDictionary<NSString *, NSString *> *> *rows = overview[@"rows"];
+        NSString *total = overview[@"total"];
+        NSString *error = overview[@"error"];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.rows = rows ?: @[];
+            self.total = total ?: @"?";
+            self.error = error;
+            [self.selected removeAllIndexes];
+            [self.table reloadData];
+            [self setBusy:NO];
+            [self updateStatus];
+        });
+    });
+}
+
+- (void)updateStatus {
+    if (self.error.length) {
+        self.statusLabel.text = [NSString stringWithFormat:@"ERROR: %@\n%@", self.error, kDefaultPhotosDatabase];
+        self.detailButton.enabled = NO;
+        self.compareButton.enabled = NO;
+        return;
+    }
+    self.statusLabel.text = [NSString stringWithFormat:
+        @"loaded %lu of %@ assets   selected: %lu\n%@\ntap a row to select; Detail = 1 row, Compare = 2+ rows",
+        (unsigned long)self.rows.count, self.total, (unsigned long)self.selected.count, kDefaultPhotosDatabase];
+    self.detailButton.enabled = (self.selected.count >= 1);
+    self.compareButton.enabled = (self.selected.count >= 2);
+}
+
+- (void)loadMore:(id)sender {
+    self.limit = MIN(self.limit * 4, 20000);
+    [self reload];
+}
+
+- (NSArray<NSString *> *)selectedPrimaryKeys {
+    NSMutableArray<NSString *> *keys = [NSMutableArray array];
+    [self.selected enumerateIndexesUsingBlock:^(NSUInteger index, BOOL *stop) {
+        if (index < self.rows.count) {
+            NSString *key = self.rows[index][@"Z_PK"];
+            if (key.length) [keys addObject:key];
+        }
+    }];
+    return keys;
+}
+
+#pragma mark Actions
+
+- (void)showCensus:(id)sender {
+    [self setBusy:YES];
+    self.statusLabel.text = @"reading the ZASSET class census…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        PhotoDatabaseInspector *inspector = [[PhotoDatabaseInspector alloc] initWithDatabasePath:kDefaultPhotosDatabase];
+        NSString *report = [inspector assetCensusReport];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setBusy:NO];
+            [self pushReportNamed:@"Census" text:report];
+        });
+    });
+}
+
+- (void)showDetail:(id)sender {
+    NSArray<NSString *> *keys = [self selectedPrimaryKeys];
+    if (!keys.count) return;
+    NSString *key = keys.firstObject;
+    [self setBusy:YES];
+    self.statusLabel.text = [NSString stringWithFormat:@"dumping Z_PK=%@…", key];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        PhotoDatabaseInspector *inspector = [[PhotoDatabaseInspector alloc] initWithDatabasePath:kDefaultPhotosDatabase];
+        NSString *report = [inspector assetDumpReportForSearch:key];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setBusy:NO];
+            [self pushReportNamed:[NSString stringWithFormat:@"Z_PK=%@", key] text:report];
+        });
+    });
+}
+
+- (void)compareSelected:(id)sender {
+    NSArray<NSString *> *keys = [self selectedPrimaryKeys];
+    if (keys.count < 2) return;
+    [self setBusy:YES];
+    self.statusLabel.text = [NSString stringWithFormat:@"comparing %lu assets…", (unsigned long)keys.count];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        PhotoDatabaseInspector *inspector = [[PhotoDatabaseInspector alloc] initWithDatabasePath:kDefaultPhotosDatabase];
+        NSString *report = [inspector assetCompareReportForSearches:keys];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setBusy:NO];
+            [self pushReportNamed:@"Compare" text:report];
+        });
+    });
+}
+
+- (void)pushReportNamed:(NSString *)name text:(NSString *)text {
+    ReportViewController *report = [ReportViewController new];
+    report.reportName = name;
+    report.reportText = text;
+    [self.navigationController pushViewController:report animated:YES];
+}
+
+#pragma mark Table
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return (NSInteger)self.rows.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    AssetCell *cell = [tableView dequeueReusableCellWithIdentifier:@"asset" forIndexPath:indexPath];
+    NSDictionary<NSString *, NSString *> *row = self.rows[(NSUInteger)indexPath.row];
+    BOOL isSelected = [self.selected containsIndex:(NSUInteger)indexPath.row];
+    cell.line1.text = [NSString stringWithFormat:@"%@ %@", isSelected ? @"[x]" : @"[ ]", row[@"ZFILENAME"]];
+    cell.line2.text = [NSString stringWithFormat:@"Z_PK=%@  %@/%@/%@  %@  %@",
+                       row[@"Z_PK"], row[@"ZKIND"], row[@"ZKINDSUBTYPE"], row[@"ZSAVEDASSETTYPE"],
+                       row[@"ZUNIFORMTYPEIDENTIFIER"], row[@"ZDATECREATED"]];
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSUInteger index = (NSUInteger)indexPath.row;
+    if ([self.selected containsIndex:index]) [self.selected removeIndex:index];
+    else [self.selected addIndex:index];
+    [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+    [self updateStatus];
+}
+
+@end
+
+#pragma mark - Root screen (Phase 1)
 
 @interface ViewController ()
 @property(nonatomic, strong) UITextView *output;
@@ -226,21 +359,13 @@ static NSString *const kDefaultPhotosDatabase = @"/var/mobile/Media/PhotoData/Ph
     self.title = @"Photos DB Inspector";
     self.view.backgroundColor = UIColor.systemBackgroundColor;
 
-    self.scanButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.scanButton setTitle:@"Scan Photos DB" forState:UIControlStateNormal];
+    self.scanButton = MakeButton(@"Scan Photos DB", self, @selector(scan:));
     self.scanButton.titleLabel.font = [UIFont boldSystemFontOfSize:17];
-    [self.scanButton addTarget:self action:@selector(scan:) forControlEvents:UIControlEventTouchUpInside];
-
-    self.assetButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.assetButton setTitle:@"Asset Inspector" forState:UIControlStateNormal];
+    self.assetButton = MakeButton(@"Asset Inspector", self, @selector(openAssetInspector:));
     self.assetButton.titleLabel.font = [UIFont boldSystemFontOfSize:17];
-    [self.assetButton addTarget:self action:@selector(openAssetInspector:) forControlEvents:UIControlEventTouchUpInside];
-
-    self.exportButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.exportButton setTitle:@"Export…" forState:UIControlStateNormal];
+    self.exportButton = MakeButton(@"Export…", self, @selector(export:));
     self.exportButton.titleLabel.font = [UIFont boldSystemFontOfSize:17];
     self.exportButton.enabled = NO;
-    [self.exportButton addTarget:self action:@selector(export:) forControlEvents:UIControlEventTouchUpInside];
 
     UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[self.scanButton, self.assetButton, self.exportButton]];
     buttons.axis = UILayoutConstraintAxisVertical;
@@ -249,10 +374,13 @@ static NSString *const kDefaultPhotosDatabase = @"/var/mobile/Media/PhotoData/Ph
 
     self.output = [UITextView new];
     self.output.editable = NO;
+    self.output.selectable = NO;
     self.output.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     self.output.text = @"Ready.\n\nThis inspector is READ-ONLY.\n"
-                        "\"Scan Photos DB\" performs the Phase 1 schema scan of /var/mobile/Media/PhotoData.\n"
-                        "\"Asset Inspector\" reads real asset records from Photos.sqlite (Phase 2).\n\n"
+                        "\"Scan Photos DB\" runs the Phase 1 schema scan of /var/mobile/Media/PhotoData.\n"
+                        "\"Asset Inspector\" reads real asset records from Photos.sqlite (Phase 2). Samples are\n"
+                        "chosen by tapping rows - there is no text input, because showing the keyboard\n"
+                        "crashed version 0.2.0 on iOS 15.8.8 (see the crash report in logs/).\n\n"
                         "Neither path writes to any database.\n";
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[buttons, self.output]];
@@ -285,7 +413,7 @@ static NSString *const kDefaultPhotosDatabase = @"/var/mobile/Media/PhotoData/Ph
 }
 
 - (void)openAssetInspector:(id)sender {
-    [self.navigationController pushViewController:[AssetInspectorViewController new] animated:YES];
+    [self.navigationController pushViewController:[AssetListViewController new] animated:YES];
 }
 
 - (void)export:(id)sender {

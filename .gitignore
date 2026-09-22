@@ -2,3 +2,6 @@ build/
 .trash/
 .DS_Store
 *.xcuserstate
+
+# local agent workspace (notes, not project output)
+.workbuddy/
