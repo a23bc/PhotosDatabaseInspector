@@ -156,7 +156,9 @@ static UIStackView *MakeButtonRow(NSArray<UIView *> *views) {
     self.statusLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
 
-    self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    /* CGRectZero is a real CoreGraphics symbol; this target links UIKit and Foundation only,
+       so use the inline CGRectMake instead. The frame is replaced by Auto Layout anyway. */
+    self.table = [[UITableView alloc] initWithFrame:CGRectMake(0, 0, 0, 0) style:UITableViewStylePlain];
     self.table.dataSource = self;
     self.table.delegate = self;
     self.table.rowHeight = 48;
